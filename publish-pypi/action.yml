@@ -7,9 +7,12 @@ inputs:
   selection:
     description: The gate's selection output.
     required: true
-  packages-dir:
-    description: Directory of the built wheels and sdists.
-    default: dist/
+  dir:
+    description: >-
+      Where the build artifacts were downloaded (pattern `release--*`, not
+      merged); the selected PyPI packages' wheels and sdists are taken from
+      <dir>/release--<package>--*/.
+    default: dist
 runs:
   using: composite
   steps:
@@ -17,9 +20,26 @@ runs:
       env:
         SELECTION: ${{ inputs.selection }}
       run: python3 "$GITHUB_ACTION_PATH/../scripts/release.py" preflight --registry pypi --selection "$SELECTION"
+    - id: gather
+      shell: bash
+      env:
+        SELECTION: ${{ inputs.selection }}
+        DIR: ${{ inputs.dir }}
+      run: |
+        set -euo pipefail
+        shopt -s nullglob
+        out="$RUNNER_TEMP/pypi-dist"
+        mkdir -p "$out"
+        for slug in $(jq -r '.[] | select(.registry == "pypi") | .slug' <<<"$SELECTION"); do
+          for file in "$DIR"/release--"$slug"--*/*; do
+            case "$file" in *.whl|*.tar.gz) cp "$file" "$out/" ;; esac
+          done
+        done
+        if [ -z "$(ls -A "$out")" ]; then echo "::error::no wheels or sdists in $DIR/release--<package>--*/"; exit 1; fi
+        echo "dir=$out" >> "$GITHUB_OUTPUT"
     - uses: pypa/gh-action-pypi-publish@release/v1
       with:
-        packages-dir: ${{ inputs.packages-dir }}
+        packages-dir: ${{ steps.gather.outputs.dir }}
     - shell: bash
       env:
         SELECTION: ${{ inputs.selection }}

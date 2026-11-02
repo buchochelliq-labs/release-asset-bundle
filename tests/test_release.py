@@ -1,4 +1,4 @@
-"""release.py: RELEASES.toml checks, tagging and the CI gate, on real git
+"""release.py: release-kit.yml checks, artifacts, tagging and the CI gate, on real git
 repositories in temporary directories. Registries and runs are faked."""
 
 import json
@@ -13,17 +13,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import release  # noqa: E402
 
 CONFIG = """
-[[package]]
-name = "core"
-registry = "crates.io"
-manifest = "crates/core/Cargo.toml"
-version = "0.1.0"
-
-[[package]]
-name = "tool"
-registry = "crates.io"
-manifest = "crates/tool/Cargo.toml"
-version = "0.2.0"
+packages:
+  - name: core
+    registry: crates.io
+    manifest: crates/core/Cargo.toml
+    version: "0.1.0"
+  - name: tool
+    registry: crates.io
+    manifest: crates/tool/Cargo.toml
+    version: "0.2.0"
 """
 
 FILES = {
@@ -32,7 +30,7 @@ FILES = {
     "crates/core/src/lib.rs": "pub fn core() {}\n",
     "crates/tool/Cargo.toml": '[package]\nname = "tool"\nversion = "0.2.0"\n[dependencies]\ncore = { path = "../core" }\n',
     "crates/tool/src/main.rs": "fn main() {}\n",
-    "RELEASES.toml": CONFIG,
+    "release-kit.yml": CONFIG,
 }
 
 
@@ -60,30 +58,30 @@ class Check(unittest.TestCase):
             "js/package.json": json.dumps({"name": "@org/lib", "version": "2.0.0"}),
             "ext/package.json": json.dumps({"name": "ext", "publisher": "org", "version": "0.3.0"}),
             "bin/Cargo.toml": '[package]\nname = "bin"\nversion = "1.2.3"\n',
-            "RELEASES.toml": """
-[release]
-name_from = "bin"
-[[package]]
-name = "pkg"
-registry = "pypi"
-manifest = "py/pyproject.toml"
-version = "1.0.0rc1"
-[[package]]
-name = "@org/lib"
-registry = "npm"
-manifest = "js/package.json"
-version = "2.0.0"
-[[package]]
-name = "org.ext"
-registry = "vscode"
-manifest = "ext/package.json"
-version = "0.3.0"
-[[package]]
-name = "bin"
-registry = "github"
-manifest = "bin/Cargo.toml"
-version = "1.2.3"
-tag = "v{version}"
+            "release-kit.yml": """
+release:
+  name_from: bin
+packages:
+  - name: pkg
+    registry: pypi
+    manifest: py/pyproject.toml
+    version: "1.0.0rc1"
+    artifacts: [{kind: python}]
+  - name: "@org/lib"
+    registry: npm
+    manifest: js/package.json
+    version: "2.0.0"
+  - name: org.ext
+    registry: vscode
+    manifest: ext/package.json
+    version: "0.3.0"
+    artifacts: [{kind: vsix}]
+  - name: bin
+    registry: github
+    manifest: bin/Cargo.toml
+    version: "1.2.3"
+    tag: "v{version}"
+    artifacts: [{kind: rust-binary, bin: bin}]
 """,
         }
         self.assertEqual(release.check(reader(files)), [])
@@ -92,27 +90,109 @@ tag = "v{version}"
 
     def test_disagreements_are_reported(self):
         files = dict(FILES)
-        files["RELEASES.toml"] = CONFIG.replace('version = "0.2.0"', 'version = "0.3.0"').replace(
-            'name = "core"', 'name = "kore"', 1)
+        files["release-kit.yml"] = CONFIG.replace('version: "0.2.0"', 'version: "0.3.0"').replace(
+            "name: core", "name: kore", 1)
         errors = "\n".join(release.check(reader(files)))
-        self.assertIn("tool: RELEASES.toml says 0.3.0, crates/tool/Cargo.toml says 0.2.0", errors)
+        self.assertIn("tool: release-kit.yml says 0.3.0, crates/tool/Cargo.toml says 0.2.0", errors)
         self.assertIn("kore: crates/core/Cargo.toml names the package 'core'", errors)
 
     def test_a_package_comes_after_what_it_depends_on(self):
         files = dict(FILES)
-        first, second = CONFIG.split("\n[[package]]\nname = \"tool\"")
-        files["RELEASES.toml"] = "[[package]]\nname = \"tool\"" + second + "\n" + first
+        head, core, tool = CONFIG.split("  - name: ")
+        files["release-kit.yml"] = head + "  - name: " + tool.rstrip() + "\n  - name: " + core
         self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
 
     def test_record_tags_are_distinct_from_each_other_and_the_release_tag(self):
         files = dict(FILES)
-        files["RELEASES.toml"] = CONFIG.replace('version = "0.2.0"\n', 'version = "0.2.0"\ntag = "release-{version}"\n')
+        files["release-kit.yml"] = CONFIG.replace('version: "0.2.0"\n', 'version: "0.2.0"\n    tag: "release-{version}"\n')
         self.assertTrue(any("is the release tag" in e for e in release.check(reader(files))))
 
-    def test_unknown_registry_and_bad_versions(self):
+    def test_unknown_registry_and_unquoted_versions(self):
         files = dict(FILES)
-        files["RELEASES.toml"] = CONFIG.replace('registry = "crates.io"', 'registry = "maven"', 1)
+        files["release-kit.yml"] = CONFIG.replace("registry: crates.io", "registry: maven", 1)
         self.assertTrue(any("unknown registry 'maven'" in e for e in release.check(reader(files))))
+        files["release-kit.yml"] = CONFIG.replace('version: "0.1.0"', "version: 0.10")
+        self.assertTrue(any("quote the version" in e for e in release.check(reader(files))))
+
+
+class Artifacts(unittest.TestCase):
+    def config(self, package):
+        files = {"bin/Cargo.toml": '[package]\nname = "app"\nversion = "1.0.0"\n',
+                 "release-kit.yml": "packages:\n  - " + package.strip().replace("\n", "\n    ") + "\n"}
+        return reader(files)
+
+    def test_artifacts_are_checked_against_their_registry(self):
+        cases = {
+            'name: app\nregistry: github\nmanifest: bin/Cargo.toml\nversion: "1.0.0"': "needs at least one artifact",
+            'name: app\nregistry: github\nmanifest: bin/Cargo.toml\nversion: "1.0.0"\nartifacts: [{kind: wheel}]':
+                "unknown kind 'wheel'",
+            'name: app\nregistry: github\nmanifest: bin/Cargo.toml\nversion: "1.0.0"\nartifacts: [{kind: rust-binary}]':
+                "rust-binary needs bin",
+            'name: app\nregistry: github\nmanifest: bin/Cargo.toml\nversion: "1.0.0"\n'
+            'artifacts: [{kind: rust-binary, bin: app, targets: [riscv64gc-unknown-linux-gnu]}]': "no runner known",
+            'name: app\nregistry: crates.io\nmanifest: bin/Cargo.toml\nversion: "1.0.0"\n'
+            'artifacts: [{kind: rust-binary, bin: app}]': "publishes from source",
+            'name: app\nregistry: github\nmanifest: bin/Cargo.toml\nversion: "1.0.0"\n'
+            'artifacts: [{kind: vsix, bin: x}]': "does not take bin",
+        }
+        for package, message in cases.items():
+            errors = "\n".join(release.check(self.config(package)))
+            self.assertIn(message, errors, package)
+
+    def test_the_plan_has_a_job_per_artifact_and_target(self):
+        read = self.config('name: app\nregistry: github\nmanifest: bin/Cargo.toml\nversion: "1.0.0"\n'
+                           'artifacts:\n  - {kind: rust-binary, bin: app, include: [README.md]}\n'
+                           '  - {kind: command, run: "make docs", outputs: "docs/*.pdf"}')
+        selection = json.dumps([{"name": "app", "registry": "github"}])
+        jobs = release.plan(selection, read=read)
+        binaries = [j for j in jobs if j["kind"] == "rust-binary"]
+        self.assertEqual([j["target"] for j in binaries], release.DEFAULT_TARGETS)
+        self.assertEqual({j["os"] for j in binaries},
+                         {"ubuntu-latest", "ubuntu-24.04-arm", "macos-latest", "windows-latest"})
+        self.assertEqual(binaries[0]["crate"], "app", "the crate defaults to the manifest's package")
+        self.assertEqual(jobs[-1]["kind"], "command")
+        self.assertEqual(release.plan(json.dumps([]), read=read), [], "only what the gate selected")
+
+    def test_maturin_plans_wheels_per_target_and_an_sdist(self):
+        files = {"py/pyproject.toml": '[project]\nname = "pkg"\nversion = "1.0"\n',
+                 "release-kit.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
+                                    '    version: "1.0"\n    artifacts: [{kind: maturin, targets: [x86_64-unknown-linux-gnu]}]\n'}
+        jobs = release.plan(json.dumps([{"name": "pkg", "registry": "pypi"}]), read=reader(files))
+        self.assertEqual([j["kind"] for j in jobs], ["maturin", "maturin-sdist"])
+        self.assertEqual({j["cargo"] for j in jobs}, {"py/Cargo.toml"}, "maturin builds the crate beside pyproject.toml")
+
+    def test_a_command_artifact_is_built_with_checksums_for_github(self):
+        with tempfile.TemporaryDirectory() as d:
+            cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                job = {"id": "app-command-0", "kind": "command", "package": "app", "slug": "app", "version": "1.0.0",
+                       "registry": "github", "run": 'mkdir -p build && echo "v$VERSION" > build/notes.txt',
+                       "outputs": "build/*.txt"}
+                made = release.build(job, Path(d) / "dist")
+                self.assertEqual([p.name for p in made], ["notes.txt"])
+                digest, name = (Path(d) / "dist/notes.txt.sha256").read_text().split()
+                self.assertEqual(name, "notes.txt")
+                self.assertEqual((Path(d) / "dist/notes.txt").read_text().strip(), "v1.0.0")
+            finally:
+                os.chdir(cwd)
+
+    def test_binaries_are_archived_with_their_files(self):
+        import tarfile
+        import zipfile
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            (base / "onto").write_text("binary")
+            (base / "README.md").write_text("read me")
+            tgz = release.archive_binary(base / "onto", "onto-v1.0.0-x86_64-unknown-linux-gnu",
+                                         [base / "README.md"], base / "out", windows=False)
+            with tarfile.open(tgz) as archive:
+                members = {m.name: m.mode for m in archive.getmembers()}
+            self.assertEqual(set(members), {"onto-v1.0.0-x86_64-unknown-linux-gnu/onto",
+                                            "onto-v1.0.0-x86_64-unknown-linux-gnu/README.md"})
+            self.assertEqual(members["onto-v1.0.0-x86_64-unknown-linux-gnu/onto"] & 0o111, 0o111, "executable")
+            zipped = release.archive_binary(base / "onto", "onto-win", [], base / "out", windows=True)
+            self.assertEqual(zipfile.ZipFile(zipped).namelist(), ["onto-win/onto"])
 
 
 class Repo(unittest.TestCase):
@@ -275,12 +355,12 @@ class Sync(unittest.TestCase):
             for path, text in FILES.items():
                 (base / path).parent.mkdir(parents=True, exist_ok=True)
                 (base / path).write_text(text)
-            (base / "RELEASES.toml").write_text("# keep me\n" + CONFIG)
+            (base / "release-kit.yml").write_text("# keep me\n" + CONFIG)
             (base / "crates/tool/Cargo.toml").write_text(FILES["crates/tool/Cargo.toml"].replace("0.2.0", "0.2.1"))
-            changes = release.sync(path=base / "RELEASES.toml")
+            changes = release.sync(path=base / "release-kit.yml")
             self.assertEqual(changes, ["tool: 0.2.0 -> 0.2.1"])
-            text = (base / "RELEASES.toml").read_text()
-            self.assertTrue(text.startswith("# keep me") and 'version = "0.2.1"' in text)
+            text = (base / "release-kit.yml").read_text()
+            self.assertTrue(text.startswith("# keep me") and 'version: "0.2.1"' in text)
 
 
 if __name__ == "__main__":

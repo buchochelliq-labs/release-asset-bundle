@@ -1,10 +1,11 @@
-"""The buchochelliq-labs release driver: RELEASES.toml, checked, tagged and gated.
+"""The buchochelliq-labs release driver: release-kit.yml, checked, built, tagged and gated.
 
-RELEASES.toml lists every package a repository publishes, on which registry,
-from which manifest, at which version, in publication order. A release is cut
-from one commit of the default branch and named by one package's version (the
-last, unless `[release] name_from` says otherwise). Generalised from
-rs-rich-cli's release_cohort.py; the rules are the same:
+release-kit.yml lists every package a repository publishes, on which registry,
+from which manifest, at which version, in publication order, and the
+artifacts each one is built into. A release is cut from one commit of the
+default branch and named by one package's version (the last, unless
+`release: name_from` says otherwise). Generalised from rs-rich-cli's
+release_cohort.py; the rules are the same:
 
   - A published version is permanent: nothing already on its registry is
     tagged, selected or uploaded again.
@@ -17,9 +18,10 @@ rs-rich-cli's release_cohort.py; the rules are the same:
     part of the release is pushed again and publishes only what is still due.
 
 Commands (person):
-    check       RELEASES.toml matches every manifest, names no package twice,
-                and lists each package after the listed packages it depends on.
-    sync        rewrite RELEASES.toml's versions from the manifests.
+    check       release-kit.yml matches every manifest, names no package twice,
+                lists each package after the listed packages it depends on,
+                and declares artifacts each registry can publish.
+    sync        rewrite release-kit.yml's versions from the manifests.
     status      each package: version, tag, and whether it is published.
     tag         tag the release and wait for it: an annotated record tag per
                 package due (which starts nothing), then the release tag,
@@ -34,10 +36,17 @@ Commands (the gate action, in CI):
                 refuse, before uploading, any selected package of R already on R.
     verify --registry R --selection JSON
                 wait until every selected package of R is on R.
+    plan --selection JSON
+                the build matrix: one job per artifact (and target) of the
+                selected packages. Writes `jobs` and `count` to GITHUB_OUTPUT.
+    build --job JSON
+                build one planned job into dist/, with a .sha256 per file for
+                GitHub Releases.
 
 Registries: github (GitHub Releases), crates.io, pypi, npm, vscode (Visual
-Studio Marketplace). Requires Python 3.11+ and git; `tag` follows runs with
-the GitHub CLI (`gh`) when it is installed.
+Studio Marketplace). Artifact kinds: rust-binary, python, maturin, vsix and
+command. Requires Python 3.11+, git and PyYAML (for release-kit.yml); `tag`
+follows runs with the GitHub CLI (`gh`) when it is installed.
 """
 
 import sys
@@ -46,21 +55,24 @@ if sys.version_info < (3, 11):
     sys.exit(f"release.py needs Python 3.11 or newer (for tomllib); this is {sys.version.split()[0]}")
 
 import argparse
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import fnmatch
+import hashlib
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
 import shutil
 import subprocess
+import tarfile
 import time
 import tomllib
+import zipfile
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-CONFIG = "RELEASES.toml"
+CONFIG = "release-kit.yml"
 REGISTRIES = ("github", "crates.io", "pypi", "npm", "vscode")
 NUMBER = r"(?:0|[1-9][0-9]*)"
 PRERELEASE = rf"(?:{NUMBER}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
@@ -90,7 +102,7 @@ def files_at(commit):
 
 
 # ---------------------------------------------------------------------------
-# RELEASES.toml
+# release-kit.yml
 
 
 @dataclass(frozen=True)
@@ -101,6 +113,12 @@ class Package:
     version: str
     tag_format: str = "{name}-v{version}"
     paths: tuple = ()
+    artifacts: tuple = field(default=(), compare=False, hash=False)
+
+    @property
+    def slug(self):
+        """The name as a file and artifact name: @org/pkg -> org-pkg."""
+        return re.sub(r"[^A-Za-z0-9._-]+", "-", self.name).strip("-")
 
     @property
     def tag(self):
@@ -135,22 +153,41 @@ class Release:
         return self.tag_format.format(release=self.name)
 
 
+def parse_config(text):
+    try:
+        import yaml
+    except ImportError:
+        raise RuntimeError(f"release.py reads {CONFIG} with PyYAML: pip install pyyaml") from None
+    data = yaml.safe_load(text) or {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{CONFIG} must be a mapping with `packages:`")
+    return data
+
+
 def load(read):
-    data = tomllib.loads(read(CONFIG))
-    entries = data.get("package", [])
+    data = parse_config(read(CONFIG))
+    entries = data.get("packages") or []
     if not entries:
-        raise ValueError(f"{CONFIG} lists no [[package]]")
+        raise ValueError(f"{CONFIG} lists no packages")
     packages = []
     for entry in entries:
         missing = {"name", "registry", "manifest", "version"} - entry.keys()
         if missing:
             raise ValueError(f"{CONFIG}: a package lacks {', '.join(sorted(missing))}")
+        if not isinstance(entry["version"], str):
+            # YAML reads 0.10 as the number 0.1: versions must be quoted.
+            raise ValueError(f"{entry['name']}: quote the version (version: \"{entry['version']}\"); "
+                             "YAML reads an unquoted one as a number")
+        artifacts = entry.get("artifacts") or []
+        if not isinstance(artifacts, list) or not all(isinstance(a, dict) for a in artifacts):
+            raise ValueError(f"{entry['name']}: artifacts must be a list of mappings")
         packages.append(Package(entry["name"], entry["registry"], entry["manifest"], entry["version"],
-                                entry.get("tag", "{name}-v{version}"), tuple(entry.get("paths", ()))))
-    settings = data.get("release", {})
+                                entry.get("tag", "{name}-v{version}"), tuple(entry.get("paths") or ()),
+                                tuple(artifacts)))
+    settings = data.get("release") or {}
     name_from = settings.get("name_from", packages[-1].name)
     if name_from not in {p.name for p in packages}:
-        raise ValueError(f"{CONFIG}: [release] name_from = {name_from!r} is not a listed package")
+        raise ValueError(f"{CONFIG}: release.name_from = {name_from!r} is not a listed package")
     return Release(tuple(packages), name_from, settings.get("tag", "release-{release}"),
                    settings.get("branch", "main"))
 
@@ -207,7 +244,7 @@ def manifest_info(read, package):
 
 
 def check(read):
-    """Every way RELEASES.toml can disagree with the repository, as messages."""
+    """Every way release-kit.yml can disagree with the repository, as messages."""
     try:
         release = load(read)
     except (ValueError, tomllib.TOMLDecodeError, KeyError) as error:
@@ -239,6 +276,8 @@ def check(read):
                           "(run release.py sync)")
         if package.registry != "github" and name != package.name:
             errors.append(f"{package.name}: {package.manifest} names the package {name!r}")
+    for package in release.packages:
+        errors.extend(artifact_errors(package))
     # Each package after the listed packages of its own registry it depends on.
     position = {(p.registry, p.name): i for i, p in enumerate(release.packages)}
     for package in release.packages:
@@ -250,26 +289,25 @@ def check(read):
 
 
 def sync(read=None, path=None):
-    """Rewrite each version in RELEASES.toml from its manifest, keeping the
+    """Rewrite each version in release-kit.yml from its manifest, keeping the
     file's comments and layout. Returns the changes made."""
     path = path or root() / CONFIG
     read = read or files_on_disk(path.parent)
     text = path.read_text(encoding="utf-8")
+    release = load(lambda name: text if name == CONFIG else read(name))
+    # One `version:` line per package, in order (artifacts carry none).
+    lines = text.splitlines(keepends=True)
+    found = [i for i, line in enumerate(lines) if re.match(r"^\s*(?:-\s+)?version:", line)]
+    if len(found) != len(release.packages):
+        raise ValueError(f"{CONFIG}: expected one `version:` line per package, found {len(found)}")
     changes = []
-    blocks = re.split(r"(?m)^(?=\[\[package\]\])", text)
-    for i, block in enumerate(blocks):
-        manifest = re.search(r'(?m)^manifest\s*=\s*"([^"]+)"', block)
-        current = re.search(r'(?m)^version\s*=\s*"([^"]+)"', block)
-        registry = re.search(r'(?m)^registry\s*=\s*"([^"]+)"', block)
-        name = re.search(r'(?m)^name\s*=\s*"([^"]+)"', block)
-        if not (manifest and current and registry and name):
-            continue
-        package = Package(name[1], registry[1], manifest[1], current[1])
+    for index, package in zip(found, release.packages):
         version = manifest_info(read, package)[1]
-        if version != current[1]:
-            blocks[i] = block[:current.start(1)] + version + block[current.end(1):]
-            changes.append(f"{package.name}: {current[1]} -> {version}")
-    path.write_text("".join(blocks), encoding="utf-8")
+        if version != package.version:
+            lines[index] = re.sub(r"(version:\s*)([\"']?)[^\"'\s#]+([\"']?)",
+                                  lambda m: f'{m[1]}"{version}"', lines[index], count=1)
+            changes.append(f"{package.name}: {package.version} -> {version}")
+    path.write_text("".join(lines), encoding="utf-8")
     return changes
 
 
@@ -329,6 +367,209 @@ def published_on(package):
                                    headers=headers)
         return status == 200 and bool(json.loads(body).get("assets"))
     raise ValueError(f"unknown registry {package.registry!r}")
+
+
+# ---------------------------------------------------------------------------
+# Artifacts: what each package is built into, declared in release-kit.yml
+
+# Rust targets and the GitHub runner that builds each. Intel macOS is
+# cross-compiled on Apple Silicon (GitHub retired the Intel runners).
+RUNNERS = {
+    "x86_64-unknown-linux-gnu": "ubuntu-latest",
+    "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm",
+    "aarch64-apple-darwin": "macos-latest",
+    "x86_64-apple-darwin": "macos-latest",
+    "x86_64-pc-windows-msvc": "windows-latest",
+    "aarch64-pc-windows-msvc": "windows-11-arm",
+}
+DEFAULT_TARGETS = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aarch64-apple-darwin",
+                   "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]
+# kind: (registries it can feed, required fields, optional fields)
+KINDS = {
+    "rust-binary": ({"github"}, {"bin"}, {"crate", "targets", "include"}),
+    "python": ({"pypi", "github"}, set(), {"dir"}),
+    "maturin": ({"pypi", "github"}, set(), {"targets", "sdist"}),
+    "vsix": ({"vscode", "github"}, set(), {"dir"}),
+    "command": ({"github", "pypi", "vscode"}, {"run", "outputs"}, {"os"}),
+}
+# Registries that publish from source need no artifacts; the others do.
+FROM_SOURCE = {"crates.io", "npm"}
+
+
+def targets_of(artifact):
+    """[(target, runner)], from strings or {target, runner} mappings."""
+    out = []
+    for entry in artifact.get("targets") or DEFAULT_TARGETS:
+        if isinstance(entry, dict):
+            target = entry.get("target")
+            out.append((target, entry.get("runner") or RUNNERS.get(target)))
+        else:
+            out.append((entry, RUNNERS.get(entry)))
+    return out
+
+
+def artifact_errors(package):
+    """What is wrong with a package's artifacts, as messages."""
+    errors = []
+    if package.registry in FROM_SOURCE:
+        if package.artifacts:
+            errors.append(f"{package.name}: {package.registry} publishes from source; remove its artifacts")
+        return errors
+    if not package.artifacts:
+        errors.append(f"{package.name}: {package.registry} needs at least one artifact "
+                      f"({', '.join(k for k, v in KINDS.items() if package.registry in v[0])})")
+    for index, artifact in enumerate(package.artifacts):
+        kind = artifact.get("kind")
+        where = f"{package.name}: artifact {index + 1}"
+        if kind not in KINDS:
+            errors.append(f"{where}: unknown kind {kind!r} (use {', '.join(KINDS)})")
+            continue
+        registries, required, optional = KINDS[kind]
+        if package.registry not in registries:
+            errors.append(f"{where}: {kind} cannot be published to {package.registry}")
+        if missing := required - artifact.keys():
+            errors.append(f"{where}: {kind} needs {', '.join(sorted(missing))}")
+        if unknown := artifact.keys() - required - optional - {"kind"}:
+            errors.append(f"{where}: {kind} does not take {', '.join(sorted(unknown))}")
+        if kind in ("rust-binary", "maturin"):
+            for target, runner in targets_of(artifact):
+                if not runner:
+                    errors.append(f"{where}: no runner known for target {target!r}; "
+                                  "give it as {target: ..., runner: ...}")
+    return errors
+
+
+def job_id(*parts):
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", "-".join(str(p) for p in parts if p)).strip("-")
+
+
+def plan(selection, read=None, output=None):
+    """The build matrix for the selected packages: one job per artifact, or per
+    artifact and target. Writes `jobs` (JSON) and `count` to GITHUB_OUTPUT."""
+    release = load(read or files_on_disk())
+    wanted = {(s["registry"], s["name"]) for s in json.loads(selection)}
+    jobs = []
+    for package in release.packages:
+        if (package.registry, package.name) not in wanted:
+            continue
+        base = {"package": package.name, "slug": package.slug, "version": package.version,
+                "registry": package.registry, "manifest": package.manifest}
+        for index, artifact in enumerate(package.artifacts):
+            kind = artifact["kind"]
+            if kind == "rust-binary":
+                crate = artifact.get("crate") or manifest_info(read or files_on_disk(), package)[0]
+                for target, runner in targets_of(artifact):
+                    jobs.append({**base, "id": job_id(package.slug, kind, target), "kind": kind, "os": runner,
+                                 "target": target, "bin": artifact["bin"], "crate": crate,
+                                 "include": list(artifact.get("include") or [])})
+            elif kind == "maturin":
+                # maturin builds from the crate beside pyproject.toml.
+                cargo = str(PurePosixPath(package.manifest).parent / "Cargo.toml")
+                for target, runner in targets_of(artifact):
+                    jobs.append({**base, "id": job_id(package.slug, kind, target), "kind": kind, "os": runner,
+                                 "target": target, "cargo": cargo})
+                if artifact.get("sdist", True):
+                    jobs.append({**base, "id": job_id(package.slug, "sdist"), "kind": "maturin-sdist",
+                                 "os": "ubuntu-latest", "target": "", "cargo": cargo})
+            elif kind in ("python", "vsix"):
+                directory = artifact.get("dir") or str(PurePosixPath(package.manifest).parent)
+                jobs.append({**base, "id": job_id(package.slug, kind, index), "kind": kind,
+                             "os": "ubuntu-latest", "target": "", "dir": directory})
+            elif kind == "command":
+                jobs.append({**base, "id": job_id(package.slug, kind, index), "kind": kind,
+                             "os": artifact.get("os", "ubuntu-latest"), "target": "",
+                             "run": artifact["run"], "outputs": artifact["outputs"]})
+    ids = [j["id"] for j in jobs]
+    if len(ids) != len(set(ids)):
+        raise ValueError("two artifacts plan the same build job; give them different targets")
+    outputs = {"jobs": json.dumps(jobs), "count": str(len(jobs))}
+    target = output or os.environ.get("GITHUB_OUTPUT")
+    if target:
+        with open(target, "a", encoding="utf-8") as handle:
+            for key, value in outputs.items():
+                handle.write(f"{key}={value}\n")
+    for job in jobs:
+        print(f"build  {job['id']} on {job['os']}", flush=True)
+    return jobs
+
+
+def sha256_file(path):
+    """Write `<file>.sha256` as `sha256sum` does: '<hex>  <name>'."""
+    digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    Path(f"{path}.sha256").write_text(f"{digest}  {Path(path).name}\n", encoding="utf-8")
+
+
+def archive_binary(binary, name, include, out, windows):
+    """`out/<name>.zip` (Windows) or `.tar.gz`, holding `<name>/<binary>` and
+    the included files. Returns the archive's path."""
+    files = [Path(binary)] + [Path(f) for f in include]
+    out.mkdir(parents=True, exist_ok=True)
+    if windows:
+        target = out / f"{name}.zip"
+        with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+            for file in files:
+                archive.write(file, f"{name}/{file.name}")
+    else:
+        target = out / f"{name}.tar.gz"
+        with tarfile.open(target, "w:gz") as archive:
+            for file in files:
+                info = archive.gettarinfo(str(file), f"{name}/{file.name}")
+                if file == Path(binary):
+                    info.mode = 0o755
+                with open(file, "rb") as handle:
+                    archive.addfile(info, handle)
+    return target
+
+
+def run(command, cwd=None, env=None, shell=False):
+    print(f"$ {command if shell else ' '.join(command)}", flush=True)
+    # `command` artifacts run in bash everywhere (GitHub's Windows runners have Git's bash).
+    subprocess.run(command, cwd=cwd, env={**os.environ, **(env or {})}, check=True, shell=shell,
+                   executable=shutil.which("bash") if shell else None)
+
+
+def build(job, out=Path("dist")):
+    """Build one planned job into `out`; for GitHub Releases, add a .sha256
+    beside every file. maturin jobs are built by maturin-action before this
+    step, which then only adds the checksums."""
+    job = json.loads(job) if isinstance(job, str) else job
+    out = Path(out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    before = set(out.iterdir())
+    kind = job["kind"]
+    if kind == "rust-binary":
+        windows = "windows" in job["target"]
+        run(["cargo", "build", "--release", "--locked", "-p", job["crate"], "--bin", job["bin"],
+             "--target", job["target"]])
+        binary = Path("target") / job["target"] / "release" / (job["bin"] + (".exe" if windows else ""))
+        archive_binary(binary, f"{job['bin']}-v{job['version']}-{job['target']}", job.get("include", []),
+                       out, windows)
+    elif kind == "python":
+        run([sys.executable, "-m", "pip", "install", "--quiet", "build"])
+        run([sys.executable, "-m", "build", "--outdir", str(out), job["dir"]])
+    elif kind == "vsix":
+        install = ["npm", "ci"] if Path(job["dir"], "package-lock.json").exists() else ["npm", "install"]
+        run(install, cwd=job["dir"])
+        name = job["package"].split(".", 1)[-1]
+        run(["npx", "--yes", "@vscode/vsce", "package", "--out", str(out / f"{name}-{job['version']}.vsix")],
+            cwd=job["dir"])
+    elif kind == "command":
+        run(job["run"], shell=True, env={"VERSION": job["version"], "PACKAGE": job["package"], "OUT": str(out)})
+        for path in Path().glob(job["outputs"]):
+            if path.is_file() and path.resolve().parent != out:
+                shutil.copy2(path, out / path.name)
+    elif kind not in ("maturin", "maturin-sdist"):
+        raise ValueError(f"unknown build kind {kind!r}")
+    made = sorted(p for p in out.iterdir() if p not in before and not p.name.endswith(".sha256"))
+    if kind in ("maturin", "maturin-sdist"):
+        made = sorted(p for p in out.iterdir() if not p.name.endswith(".sha256"))
+    if not made:
+        raise RuntimeError(f"{job['id']} produced no files in {out}")
+    if job["registry"] == "github":
+        for path in made:
+            sha256_file(path)
+    print(f"built  {job['id']}: " + ", ".join(p.name for p in made), flush=True)
+    return made
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +724,7 @@ def gate(tag_name, remote="origin", status=published_on, output=None):
         "sha": sha,
         "release": release.name,
         "selection": json.dumps([{"name": p.name, "registry": p.registry, "version": p.version,
-                                  "manifest": p.manifest, "tag": p.tag} for p in due]),
+                                  "manifest": p.manifest, "tag": p.tag, "slug": p.slug} for p in due]),
     }
     for registry in REGISTRIES:
         outputs[registry.replace(".", "-")] = str(any(p.registry == registry for p in due)).lower()
@@ -729,6 +970,11 @@ def main(argv=None):
     gater = commands.add_parser("gate")
     gater.add_argument("tag")
     gater.add_argument("--remote", default="origin")
+    planner = commands.add_parser("plan")
+    planner.add_argument("--selection", required=True)
+    builder = commands.add_parser("build")
+    builder.add_argument("--job", required=True)
+    builder.add_argument("--out", default="dist")
     pre = commands.add_parser("preflight")
     pre.add_argument("--registry", required=True, choices=REGISTRIES)
     pre.add_argument("--selection", required=True)
@@ -751,11 +997,15 @@ def main(argv=None):
             tag(args.commit, args.remote, args.timeout, args.dry_run, args.wanted)
         elif args.command == "gate":
             gate(args.tag, args.remote)
+        elif args.command == "plan":
+            plan(args.selection)
+        elif args.command == "build":
+            build(args.job, Path(args.out))
         elif args.command == "preflight":
             preflight(args.registry, args.selection)
         elif args.command == "verify":
             verify(args.registry, args.selection, timeout=args.timeout)
-    except (RuntimeError, ValueError) as error:
+    except (RuntimeError, ValueError, subprocess.CalledProcessError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
     return 0

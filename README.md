@@ -1,10 +1,12 @@
 # release-kit
 
 The buchochelliq-labs release standard, generalised from rs-rich-cli's release
-process: one file says what a repository publishes, one command tags a
-release, and one workflow run checks it, reruns CI on the tagged commit, and
-publishes what is not yet published to GitHub Releases, crates.io, PyPI, npm
-and the VS Code Marketplace.
+process. One YAML file in the repository, `release-kit.yml`, says what the
+repository publishes and which artifacts each package is built into. One
+command tags a release. One workflow run then checks it, reruns CI on the
+tagged commit, builds the declared artifacts, and publishes what is not yet
+published to GitHub Releases, crates.io, PyPI, npm and the VS Code
+Marketplace.
 
 ## The rules
 
@@ -28,32 +30,64 @@ and the VS Code Marketplace.
    Trusted Publishing (short-lived OIDC credentials) where they offer it, in
    protected environments.
 
-## `RELEASES.toml`
+## `release-kit.yml`
 
-At the repository root, listing every package the repository publishes in
-publication order, each after the listed packages it depends on:
+At the repository root. It lists every package the repository publishes, in
+publication order, each after the listed packages it depends on, with the
+artifacts it is built into:
 
-```toml
+```yaml
 # Optional: by default the release is named by the last package's version,
 # tagged release-<version>, from main.
-[release]
-name_from = "onto"        # the package whose version names the release
-tag = "release-{release}"
-branch = "main"
+release:
+  name_from: onto           # the package whose version names the release
+  tag: "release-{release}"
+  branch: main
 
-[[package]]
-name = "onto"                         # the registry's name for it
-registry = "github"                   # github | crates.io | pypi | npm | vscode
-manifest = "crates/onto-cli/Cargo.toml"
-version = "0.1.0"                     # must match the manifest (release.py check)
-tag = "v{version}"                    # optional; default "{name}-v{version}"
-paths = ["crates/**", "Cargo.lock"]   # optional: files that make up the package
-                                      # (default: the manifest's directory)
+packages:
+  - name: onto                          # the registry's name for it
+    registry: github                    # github | crates.io | pypi | npm | vscode
+    manifest: crates/onto-cli/Cargo.toml
+    version: "0.1.0"                    # quoted; must match the manifest (release.py check)
+    tag: "v{version}"                   # optional; default "{name}-v{version}"
+    paths: ["crates/**", "Cargo.lock"]  # optional: files that make up the package
+                                        # (default: the manifest's directory)
+    artifacts:
+      - kind: rust-binary
+        bin: onto
+        crate: onto-cli                 # default: the manifest's package
+        include: [README.md]            # added to each archive
+        targets:                        # default: the five below
+          - x86_64-unknown-linux-gnu
+          - aarch64-unknown-linux-gnu
+          - aarch64-apple-darwin
+          - x86_64-apple-darwin
+          - x86_64-pc-windows-msvc
 ```
 
 Manifests are `Cargo.toml` (including `version.workspace = true`),
 `pyproject.toml` (PEP 621 or Poetry) and `package.json` (for `vscode`, the
 name is `<publisher>.<name>`).
+
+### Artifacts
+
+Each package declares what to build; the release run builds only the packages
+that are due, each artifact (and target) in its own job on the runner it
+needs.
+
+| `kind` | Builds | Registries | Fields |
+|---|---|---|---|
+| `rust-binary` | `<bin>-v<version>-<target>.tar.gz` (`.zip` on Windows) holding the binary and `include` files | github | `bin` (required), `crate`, `targets`, `include` |
+| `python` | sdist and wheel with `python -m build` | pypi, github | `dir` (default: the manifest's directory) |
+| `maturin` | wheels per target with maturin, plus an sdist | pypi, github | `targets`, `sdist` (default true) |
+| `vsix` | `<name>-<version>.vsix` with `vsce package` | vscode, github | `dir` |
+| `command` | whatever `run` makes, collected by the `outputs` glob | github, pypi, vscode | `run`, `outputs` (both required), `os` (default ubuntu-latest) |
+
+`command` runs in bash with `VERSION`, `PACKAGE` and `OUT` (the output
+directory) set. crates.io and npm publish from source and take no artifacts.
+For GitHub Releases every file gets a `.sha256`, and the publish step checks
+each one after uploading. A target is a string, or `{target: ..., runner: ...}`
+for a runner the kit doesn't know.
 
 ## The driver: `scripts/release.py`
 
@@ -62,29 +96,34 @@ repositories (`git clone https://github.com/buchochelliq-labs/release-kit`):
 
 | Command | What it does |
 |---|---|
-| `release.py check` | `RELEASES.toml` matches every manifest, names no package or tag twice, and orders each package after the listed packages it depends on. Run it in CI. |
-| `release.py sync` | Rewrites `RELEASES.toml`'s versions from the manifests after a bump. |
+| `release.py check` | `release-kit.yml` matches every manifest, names no package or tag twice, orders each package after the listed packages it depends on, and declares artifacts its registry can publish. Run it in CI. |
+| `release.py sync` | Rewrites `release-kit.yml`'s versions from the manifests after a bump. |
 | `release.py status` | Each package's version, tag, and whether it is published. |
 | `release.py tag` | On `main`: tags what is due and waits for the run. Options: `--dry-run`, `--commit SHA`, `--release X.Y.Z`. |
 
-The workflow uses `gate`, `preflight` and `verify`.
+The workflow uses `gate`, `plan`, `build`, `preflight` and `verify`. The
+script needs Python 3.11+, git and PyYAML (`pip install pyyaml`).
 
 ## The workflow
 
 Copy [`templates/release.yml`](templates/release.yml) to
-`.github/workflows/release.yml`, keep the publish jobs for your registries and
-fill in `build`. It runs **gate → ci → build → publish-…**:
+`.github/workflows/release.yml` and keep the publish jobs for your registries.
+It runs **gate → ci → build → publish-…**:
 
 - **`gate`** (`buchochelliq-labs/release-kit/gate@v1`) checks rules 1–4 on the
   checked-out tag, and outputs the selection and one flag per registry.
 - **`ci`** is your own CI on the tagged commit. Your `ci.yml` needs
   `on: workflow_call` with a `ref` input that it checks out.
+- **`build`** (`buchochelliq-labs/release-kit/.github/workflows/build.yml@v1`)
+  plans one job per declared artifact and target, and uploads each job's files
+  as `release--<package>--<job>`.
 - **`publish-<registry>`** (`buchochelliq-labs/release-kit/publish-…@v1`)
-  publishes in `RELEASES.toml` order, then waits until the registry serves
-  every version.
+  publishes each package's built artifacts, in `release-kit.yml` order, then
+  waits until the registry serves every version.
 
-The publish steps are **composite actions**, not reusable workflows, so that
-they run inside your repository's own job. Trusted Publishing on crates.io,
+Building is a reusable workflow because it needs no credentials. The publish
+steps are **composite actions**, not reusable workflows, so that they run
+inside your repository's own job. Trusted Publishing on crates.io,
 PyPI and npm identifies the publisher by the calling workflow, so the
 publisher you configure on each registry names your repository's
 `release.yml` (and its environment), not release-kit.
@@ -111,6 +150,8 @@ when they choose.
 
 The rules are the same; these are the differences:
 
+- **Config:** YAML (`release-kit.yml`) instead of TOML, and each repository
+  declares the artifacts to build rather than writing build jobs.
 - **Registries:** the registry is a field of each package, and five
   registries are supported.
 - **Single run:** a release tag publishes to every registry in one run. rs-rich

@@ -35,6 +35,12 @@ outputs:
 runs:
   using: composite
   steps:
+    # release.py reads release-kit.yml with PyYAML.
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - shell: bash
+      run: python3 -m pip install --quiet pyyaml
     # The caller checks out the tag with full history (fetch-depth: 0), so the
     # default branch and the other packages' tagged commits can be compared.
     - id: gate

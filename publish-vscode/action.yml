@@ -7,9 +7,11 @@ inputs:
   selection:
     description: The gate's selection output.
     required: true
-  vsix-dir:
-    description: Directory of the packaged .vsix files (vsce package).
-    default: dist/
+  dir:
+    description: >-
+      Where the build artifacts were downloaded (pattern `release--*`, not
+      merged); each extension's .vsix is taken from <dir>/release--<package>--*/.
+    default: dist
   vsce-token:
     description: A Visual Studio Marketplace personal access token.
     required: true
@@ -22,17 +24,19 @@ runs:
     - shell: bash
       env:
         SELECTION: ${{ inputs.selection }}
-        VSIX_DIR: ${{ inputs.vsix-dir }}
+        DIR: ${{ inputs.dir }}
         VSCE_PAT: ${{ inputs.vsce-token }}
         OVSX_PAT: ${{ inputs.ovsx-token }}
       run: |
         set -euo pipefail
         kit="$GITHUB_ACTION_PATH/../scripts/release.py"
         python3 "$kit" preflight --registry vscode --selection "$SELECTION"
-        jq -r '.[] | select(.registry == "vscode") | "\(.name)\t\(.version)"' <<<"$SELECTION" |
-        while IFS=$'\t' read -r id version; do
-          file="$VSIX_DIR/${id#*.}-$version.vsix"
-          if [ ! -f "$file" ]; then echo "::error::$file not found (vsce package names it <name>-<version>.vsix)"; exit 1; fi
+        shopt -s nullglob
+        jq -r '.[] | select(.registry == "vscode") | "\(.name)\t\(.version)\t\(.slug)"' <<<"$SELECTION" |
+        while IFS=$'\t' read -r id version slug; do
+          found=( "$DIR"/release--"$slug"--*/"${id#*.}-$version.vsix" )
+          if [ ${#found[@]} -ne 1 ]; then echo "::error::expected one ${id#*.}-$version.vsix in $DIR/release--$slug--*/"; exit 1; fi
+          file="${found[0]}"
           npx --yes @vscode/vsce publish --packagePath "$file"
           if [ -n "$OVSX_PAT" ]; then npx --yes ovsx publish "$file"; fi
         done

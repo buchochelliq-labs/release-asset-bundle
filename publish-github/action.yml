@@ -6,11 +6,14 @@ inputs:
   selection:
     description: The gate's selection output.
     required: true
+  dir:
+    description: >-
+      Where the build artifacts were downloaded (actions/download-artifact with
+      pattern `release--*`, not merged): each package's files are taken from
+      <dir>/release--<package>--*/.
+    default: dist
   files:
-    description: Files to attach (a glob, relative to the workspace), e.g. dist/*.
-    required: true
-  package:
-    description: Only this package (when the repository releases several to GitHub, each with its own files).
+    description: A glob of files to attach instead (relative to the workspace); only for a single GitHub package.
     default: ""
   token:
     description: A token with contents write on this repository.
@@ -24,19 +27,18 @@ runs:
         GH_REPO: ${{ github.repository }}
         SELECTION: ${{ inputs.selection }}
         FILES: ${{ inputs.files }}
-        ONLY: ${{ inputs.package }}
+        DIR: ${{ inputs.dir }}
       run: |
         set -euo pipefail
         kit="$GITHUB_ACTION_PATH/../scripts/release.py"
         python3 "$kit" preflight --registry github --selection "$SELECTION"
         shopt -s nullglob
-        # The input is a glob: expanding it is the point.
-        # shellcheck disable=SC2206
-        files=( $FILES )
-        if [ ${#files[@]} -eq 0 ]; then echo "::error::no files match $FILES"; exit 1; fi
-        jq -r '.[] | select(.registry == "github") | "\(.name)\t\(.version)\t\(.tag)"' <<<"$SELECTION" |
-        while IFS=$'\t' read -r name version tag; do
-          [ -n "$ONLY" ] && [ "$name" != "$ONLY" ] && continue
+        jq -r '.[] | select(.registry == "github") | "\(.name)\t\(.version)\t\(.tag)\t\(.slug)"' <<<"$SELECTION" |
+        while IFS=$'\t' read -r name version tag slug; do
+          # The input is a glob: expanding it is the point.
+          # shellcheck disable=SC2206
+          if [ -n "$FILES" ]; then files=( $FILES ); else files=( "$DIR"/release--"$slug"--*/* ); fi
+          if [ ${#files[@]} -eq 0 ]; then echo "::error::no files for $name (looked in $DIR/release--$slug--*/)"; exit 1; fi
           prerelease=(); [[ "$version" == *-* ]] && prerelease=(--prerelease)
           gh release view "$tag" >/dev/null 2>&1 ||
             gh release create "$tag" --verify-tag --title "$name $version" --generate-notes "${prerelease[@]}"

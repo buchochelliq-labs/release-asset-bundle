@@ -1,6 +1,7 @@
 # The buchochelliq-labs release workflow (release-kit). Copy to
-# .github/workflows/release.yml, keep the jobs for your registries, and fill
-# in `build`. See https://github.com/buchochelliq-labs/release-kit.
+# .github/workflows/release.yml and keep the publish jobs for the registries in
+# your release-kit.yml; what gets built comes from its `artifacts`.
+# See https://github.com/buchochelliq-labs/release-kit.
 #
 # `python3 <kit>/scripts/release.py tag` on the default branch pushes the
 # tags; the release tag starts this run, which checks it once, runs CI once
@@ -54,22 +55,14 @@ jobs:
     with:
       ref: ${{ needs.gate.outputs.sha }}
 
-  # Build what the publish jobs upload, from the tagged commit, and upload it
-  # as artifacts. Replace with your build (binaries, wheels, .vsix, ...).
+  # Builds what release-kit.yml's `artifacts` declare, for the packages due,
+  # from the tagged commit: one job per artifact and target.
   build:
     needs: [gate, ci]
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ needs.gate.outputs.sha }}
-          persist-credentials: false
-      - run: echo "build into dist/ here" && mkdir -p dist
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-          if-no-files-found: error
+    uses: buchochelliq-labs/release-kit/.github/workflows/build.yml@v1
+    with:
+      sha: ${{ needs.gate.outputs.sha }}
+      selection: ${{ needs.gate.outputs.selection }}
 
   publish-github:
     needs: [gate, build]
@@ -83,12 +76,11 @@ jobs:
           ref: ${{ needs.gate.outputs.sha }}
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist/
+          pattern: release--*
+          path: dist
       - uses: buchochelliq-labs/release-kit/publish-github@v1
         with:
           selection: ${{ needs.gate.outputs.selection }}
-          files: dist/*
 
   publish-crates:
     needs: [gate, ci]
@@ -124,12 +116,11 @@ jobs:
           ref: ${{ needs.gate.outputs.sha }}
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist/
+          pattern: release--*
+          path: dist
       - uses: buchochelliq-labs/release-kit/publish-pypi@v1
         with:
           selection: ${{ needs.gate.outputs.selection }}
-          packages-dir: dist/
 
   publish-npm:
     needs: [gate, ci]
@@ -166,11 +157,10 @@ jobs:
           node-version: "24"
       - uses: actions/download-artifact@v4
         with:
-          name: dist
-          path: dist/
+          pattern: release--*
+          path: dist
       - uses: buchochelliq-labs/release-kit/publish-vscode@v1
         with:
           selection: ${{ needs.gate.outputs.selection }}
-          vsix-dir: dist/
           vsce-token: ${{ secrets.VSCE_PAT }}
           ovsx-token: ${{ secrets.OVSX_PAT }}
