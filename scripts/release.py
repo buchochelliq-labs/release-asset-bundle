@@ -43,6 +43,14 @@ Commands (the gate action, in CI):
                 build one planned job into dist/, with a .sha256 per file for
                 GitHub Releases.
 
+Commands (installing):
+    install     from a release-kit checkout, copy the kit into the repository
+                you are in: .github/release-kit/ (this script and the actions)
+                and .github/workflows/release-kit-build.yml, with a manifest of
+                checksums; and a starter release.yml if it has none.
+    vendored    the installed copy is unmodified (run it in CI): it changes
+                only by installing again.
+
 Registries: github (GitHub Releases), crates.io, pypi, npm, vscode (Visual
 Studio Marketplace). Artifact kinds: rust-binary, python, maturin, vsix and
 command. Requires Python 3.11+, git and PyYAML (for release-kit.yml); `tag`
@@ -768,6 +776,98 @@ def verify(registry, selection, status=published_on, timeout=900, sleep=time.sle
 
 
 # ---------------------------------------------------------------------------
+# Installing: repositories use a copy of the kit (release-kit is private, and
+# GitHub lets public repositories use only public actions and workflows).
+
+KIT = Path(__file__).resolve().parent.parent
+VENDOR = ".github/release-kit"
+BUILD_WORKFLOW = ".github/workflows/release-kit-build.yml"
+MANIFEST = f"{VENDOR}/manifest.json"
+NOTICE = """# release-kit (installed copy)
+
+Installed from buchochelliq-labs/release-kit {version} ({commit}) by
+`release.py install`. Do not edit these files: CI checks them against
+manifest.json (`python3 .github/release-kit/scripts/release.py vendored`).
+To update, install again from a newer release-kit checkout:
+
+    python3 ../release-kit/scripts/release.py install
+
+This repository's release is configured in release-kit.yml at its root.
+"""
+
+
+def kit_files(kit=KIT):
+    """{path in the repository: source file} for an install."""
+    files = {f"{VENDOR}/scripts/release.py": kit / "scripts" / "release.py",
+             BUILD_WORKFLOW: kit / "workflows" / "release-kit-build.yml"}
+    for action in sorted(kit.glob("*/action.yml")):
+        files[f"{VENDOR}/{action.parent.name}/action.yml"] = action
+    return files
+
+
+def digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def install(target=None, kit=KIT):
+    """Copy the kit into the repository at `target` (default: the one you are
+    in). Returns the paths written."""
+    if not (kit / "workflows" / "release-kit-build.yml").exists():
+        raise RuntimeError("install runs from a release-kit checkout, not from an installed copy: "
+                           "git clone https://github.com/buchochelliq-labs/release-kit")
+    target = Path(target) if target else root()
+    if target.resolve() == kit.resolve():
+        raise RuntimeError("run install from the repository to install into, not from release-kit itself")
+    version = subprocess.run(["git", "describe", "--tags", "--always", "--dirty"], cwd=kit, text=True,
+                             capture_output=True).stdout.strip() or "unversioned"
+    commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=kit, text=True, capture_output=True).stdout.strip()
+    vendor = target / VENDOR
+    if vendor.exists():
+        shutil.rmtree(vendor)  # a clean copy: files the new version dropped go too
+    written = []
+    for path, source in kit_files(kit).items():
+        destination = target / path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+        written.append(path)
+    (vendor / "README.md").write_text(NOTICE.format(version=version, commit=commit[:12]), encoding="utf-8")
+    manifest = {"source": "buchochelliq-labs/release-kit", "version": version, "commit": commit,
+                "files": {path: digest(target / path) for path in sorted(written)}}
+    (target / MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    written += [f"{VENDOR}/README.md", MANIFEST]
+    starter = target / ".github" / "workflows" / "release.yml"
+    if not starter.exists():
+        shutil.copy2(kit / "templates" / "release.yml", starter)
+        written.append(".github/workflows/release.yml")
+    print(f"installed release-kit {version} into {target}:", flush=True)
+    for path in written:
+        print(f"  {path}", flush=True)
+    return written
+
+
+def vendored(target=None):
+    """Problems with the installed copy: files edited, missing, or added."""
+    target = Path(target) if target else root()
+    try:
+        manifest = json.loads((target / MANIFEST).read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [f"{MANIFEST} is missing: install release-kit (release.py install)"]
+    problems = []
+    for path, expected in manifest["files"].items():
+        file = target / path
+        if not file.exists():
+            problems.append(f"{path} is missing")
+        elif digest(file) != expected:
+            problems.append(f"{path} was edited; release-kit's files change only by installing again")
+    known = set(manifest["files"]) | {MANIFEST, f"{VENDOR}/README.md"}
+    for file in sorted((target / VENDOR).rglob("*")):
+        relative = file.relative_to(target).as_posix()
+        if file.is_file() and relative not in known and "__pycache__" not in relative:
+            problems.append(f"{relative} is not part of release-kit {manifest['version']}")
+    return problems
+
+
+# ---------------------------------------------------------------------------
 # Tagging (person)
 
 
@@ -975,6 +1075,9 @@ def main(argv=None):
     builder = commands.add_parser("build")
     builder.add_argument("--job", required=True)
     builder.add_argument("--out", default="dist")
+    installer = commands.add_parser("install")
+    installer.add_argument("--into", help="repository to install into (default: the one you are in)")
+    commands.add_parser("vendored")
     pre = commands.add_parser("preflight")
     pre.add_argument("--registry", required=True, choices=REGISTRIES)
     pre.add_argument("--selection", required=True)
@@ -1001,6 +1104,14 @@ def main(argv=None):
             plan(args.selection)
         elif args.command == "build":
             build(args.job, Path(args.out))
+        elif args.command == "install":
+            install(args.into)
+        elif args.command == "vendored":
+            if problems := vendored():
+                print("\n".join(problems), file=sys.stderr)
+                return 1
+            manifest = json.loads((root() / MANIFEST).read_text(encoding="utf-8"))
+            print(f"release-kit {manifest['version']}: the installed copy is unmodified.")
         elif args.command == "preflight":
             preflight(args.registry, args.selection)
         elif args.command == "verify":
