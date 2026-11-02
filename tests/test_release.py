@@ -348,6 +348,58 @@ class PublishSteps(unittest.TestCase):
         release.verify("crates.io", self.selection, status=lambda p: next(answers), sleep=lambda s: None)
 
 
+class Install(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.dir.name) / "repo"
+        self.repo.mkdir()
+        sh(self.repo, "git", "init", "-q", "-b", "main")
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_install_copies_the_kit_and_a_starter_workflow(self):
+        written = release.install(self.repo)
+        for path in [".github/release-kit/scripts/release.py", ".github/release-kit/gate/action.yml",
+                     ".github/release-kit/plan/action.yml", ".github/release-kit/build/action.yml",
+                     ".github/release-kit/publish-github/action.yml", ".github/workflows/release-kit-build.yml",
+                     ".github/workflows/release.yml", ".github/release-kit/manifest.json"]:
+            self.assertIn(path, written)
+            self.assertTrue((self.repo / path).is_file(), path)
+        manifest = json.loads((self.repo / ".github/release-kit/manifest.json").read_text())
+        self.assertEqual(manifest["source"], "buchochelliq-labs/release-kit")
+        self.assertEqual(release.vendored(self.repo), [])
+        # Everything is used by local path: public repositories can run it.
+        workflow = (self.repo / ".github/workflows/release.yml").read_text()
+        self.assertIn("uses: ./.github/release-kit/gate", workflow)
+        self.assertNotIn("buchochelliq-labs/release-kit/", workflow)
+
+    def test_edits_and_additions_to_the_copy_are_caught(self):
+        release.install(self.repo)
+        gate = self.repo / ".github/release-kit/gate/action.yml"
+        gate.write_text(gate.read_text() + "# local tweak\n")
+        (self.repo / ".github/release-kit/extra.sh").write_text("echo\n")
+        problems = "\n".join(release.vendored(self.repo))
+        self.assertIn("gate/action.yml was edited", problems)
+        self.assertIn("extra.sh is not part of release-kit", problems)
+
+    def test_installing_again_replaces_the_copy_and_keeps_the_release_workflow(self):
+        release.install(self.repo)
+        (self.repo / ".github/release-kit/extra.sh").write_text("echo\n")
+        own = self.repo / ".github/workflows/release.yml"
+        own.write_text(own.read_text() + "# this repository's own changes\n")
+        release.install(self.repo)
+        self.assertEqual(release.vendored(self.repo), [])
+        self.assertIn("this repository's own changes", own.read_text())
+
+    def test_install_needs_a_release_kit_checkout(self):
+        release.install(self.repo)
+        with self.assertRaisesRegex(RuntimeError, "release-kit checkout"):
+            release.install(Path(self.dir.name) / "other", kit=self.repo / ".github/release-kit")
+        self.assertEqual(release.vendored(Path(self.dir.name)), [
+            ".github/release-kit/manifest.json is missing: install release-kit (release.py install)"])
+
+
 class Sync(unittest.TestCase):
     def test_sync_rewrites_versions_and_keeps_comments(self):
         with tempfile.TemporaryDirectory() as d:

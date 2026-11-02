@@ -89,44 +89,75 @@ For GitHub Releases every file gets a `.sha256`, and the publish step checks
 each one after uploading. A target is a string, or `{target: ..., runner: ...}`
 for a runner the kit doesn't know.
 
-## The driver: `scripts/release.py`
+## Adopting it: install a copy
 
-Run it from the repository's root with a checkout of release-kit next to your
-repositories (`git clone https://github.com/buchochelliq-labs/release-kit`):
+release-kit is private, and GitHub lets public repositories use only public
+actions and workflows. So every repository, public or private, uses an
+**installed copy**. From the repository's root, with a checkout of release-kit
+next to it:
+
+```sh
+git clone https://github.com/buchochelliq-labs/release-kit ../release-kit   # once
+python3 ../release-kit/scripts/release.py install
+```
+
+That writes:
+
+- **`.github/release-kit/`:** the script and the actions, a `manifest.json` of
+  their checksums, and the version they came from;
+- **`.github/workflows/release-kit-build.yml`:** the build workflow;
+- **`.github/workflows/release.yml`:** the starter workflow, only if the
+  repository has none.
+
+Commit them with a `release-kit.yml`. Add `python3
+.github/release-kit/scripts/release.py vendored` to CI: it fails if anyone
+edits the copy, so the copy changes only by installing again. To update a
+repository, pull release-kit and run `install` again, then open a PR. That
+updates the copy and the build workflow, and leaves `release.yml` alone.
+
+The copied code is visible in a public repository. The source, tests and
+history stay private in release-kit.
+
+## The driver: `release.py`
+
+Run it from the repository's root, either as the installed copy
+(`python3 .github/release-kit/scripts/release.py`) or from the release-kit
+checkout:
 
 | Command | What it does |
 |---|---|
-| `release.py check` | `release-kit.yml` matches every manifest, names no package or tag twice, orders each package after the listed packages it depends on, and declares artifacts its registry can publish. Run it in CI. |
-| `release.py sync` | Rewrites `release-kit.yml`'s versions from the manifests after a bump. |
-| `release.py status` | Each package's version, tag, and whether it is published. |
-| `release.py tag` | On `main`: tags what is due and waits for the run. Options: `--dry-run`, `--commit SHA`, `--release X.Y.Z`. |
+| `check` | `release-kit.yml` matches every manifest, names no package or tag twice, orders each package after the listed packages it depends on, and declares artifacts its registry can publish. Run it in CI. |
+| `sync` | Rewrites `release-kit.yml`'s versions from the manifests after a bump. |
+| `status` | Each package's version, tag, and whether it is published. |
+| `tag` | On `main`: tags what is due and waits for the run. Options: `--dry-run`, `--commit SHA`, `--release X.Y.Z`. |
+| `install` | From a release-kit checkout: installs or updates the copy in the repository you are in (`--into DIR`). |
+| `vendored` | The installed copy is unmodified. Run it in CI. |
 
 The workflow uses `gate`, `plan`, `build`, `preflight` and `verify`. The
 script needs Python 3.11+, git and PyYAML (`pip install pyyaml`).
 
 ## The workflow
 
-Copy [`templates/release.yml`](templates/release.yml) to
-`.github/workflows/release.yml` and keep the publish jobs for your registries.
-It runs **gate → ci → build → publish-…**:
+`.github/workflows/release.yml` (from [`templates/release.yml`](templates/release.yml))
+runs **gate → ci → build → publish-…**. Keep the publish jobs for your
+registries:
 
-- **`gate`** (`buchochelliq-labs/release-kit/gate@v1`) checks rules 1–4 on the
-  checked-out tag, and outputs the selection and one flag per registry.
+- **`gate`** (`./.github/release-kit/gate`) checks rules 1–4 on the checked-out
+  tag, and outputs the selection and one flag per registry.
 - **`ci`** is your own CI on the tagged commit. Your `ci.yml` needs
   `on: workflow_call` with a `ref` input that it checks out.
-- **`build`** (`buchochelliq-labs/release-kit/.github/workflows/build.yml@v1`)
-  plans one job per declared artifact and target, and uploads each job's files
-  as `release--<package>--<job>`.
-- **`publish-<registry>`** (`buchochelliq-labs/release-kit/publish-…@v1`)
-  publishes each package's built artifacts, in `release-kit.yml` order, then
-  waits until the registry serves every version.
+- **`build`** (`./.github/workflows/release-kit-build.yml`) plans one job per
+  declared artifact and target (`./.github/release-kit/plan`), builds each
+  (`./.github/release-kit/build`), and uploads its files as
+  `release--<package>--<job>`.
+- **`publish-<registry>`** (`./.github/release-kit/publish-…`) publishes each
+  package's built artifacts, in `release-kit.yml` order, then waits until the
+  registry serves every version.
 
-Building is a reusable workflow because it needs no credentials. The publish
-steps are **composite actions**, not reusable workflows, so that they run
-inside your repository's own job. Trusted Publishing on crates.io,
-PyPI and npm identifies the publisher by the calling workflow, so the
-publisher you configure on each registry names your repository's
-`release.yml` (and its environment), not release-kit.
+The publish steps are **composite actions** that run inside the repository's
+own jobs. Trusted Publishing on crates.io, PyPI and npm identifies the
+publisher by the calling workflow, so the publisher you configure on each
+registry names the repository's `release.yml` (and its environment).
 
 | Registry | Credential | Set up once |
 |---|---|---|
@@ -142,9 +173,9 @@ runners).
 
 ## Versioning release-kit
 
-release-kit is tagged `v1.x.y`, and `v1` moves to the latest `v1.x.y`.
-Repositories use `@v1`. A breaking change becomes `v2`, and repositories move
-when they choose.
+release-kit is tagged `v1.x.y`. An installed copy records the version and
+commit it came from in `.github/release-kit/manifest.json`. A breaking change
+becomes `v2`, and each repository moves when it installs the new version.
 
 ## How it differs from rs-rich-cli
 
