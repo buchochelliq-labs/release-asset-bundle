@@ -1,0 +1,166 @@
+# The buchochelliq-labs release workflow (release-kit). Copy to
+# .github/workflows/release.yml and keep the publish jobs for the registries in
+# your release-kit.yml; what gets built comes from its `artifacts`.
+# See https://github.com/buchochelliq-labs/release-kit.
+#
+# `python3 <kit>/scripts/release.py tag` on the default branch pushes the
+# tags; the release tag starts this run, which checks it once, runs CI once
+# on the tagged commit, builds, and publishes what is not yet published.
+name: release
+
+on:
+  push:
+    tags: ["release-*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: An existing release tag (release-X.Y.Z) to run again
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # One release at a time; never cancel one that may be half published.
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.gate.outputs.sha }}
+      release: ${{ steps.gate.outputs.release }}
+      selection: ${{ steps.gate.outputs.selection }}
+      github: ${{ steps.gate.outputs.github }}
+      crates-io: ${{ steps.gate.outputs.crates-io }}
+      pypi: ${{ steps.gate.outputs.pypi }}
+      npm: ${{ steps.gate.outputs.npm }}
+      vscode: ${{ steps.gate.outputs.vscode }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+      - id: gate
+        uses: buchochelliq-labs/release-kit/gate@v1
+        with:
+          tag: ${{ inputs.tag || github.ref_name }}
+
+  # The repository's own CI on the tagged commit: ci.yml needs
+  # `on: workflow_call` with a `ref` input it checks out.
+  ci:
+    needs: gate
+    uses: ./.github/workflows/ci.yml
+    with:
+      ref: ${{ needs.gate.outputs.sha }}
+
+  # Builds what release-kit.yml's `artifacts` declare, for the packages due,
+  # from the tagged commit: one job per artifact and target.
+  build:
+    needs: [gate, ci]
+    uses: buchochelliq-labs/release-kit/.github/workflows/build.yml@v1
+    with:
+      sha: ${{ needs.gate.outputs.sha }}
+      selection: ${{ needs.gate.outputs.selection }}
+
+  publish-github:
+    needs: [gate, build]
+    if: needs.gate.outputs.github == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release--*
+          path: dist
+      - uses: buchochelliq-labs/release-kit/publish-github@v1
+        with:
+          selection: ${{ needs.gate.outputs.selection }}
+
+  publish-crates:
+    needs: [gate, ci]
+    if: needs.gate.outputs.crates-io == 'true'
+    runs-on: ubuntu-latest
+    environment: crates-io          # the Trusted Publisher is bound to it
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+      - id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+      - uses: buchochelliq-labs/release-kit/publish-crates@v1
+        with:
+          selection: ${{ needs.gate.outputs.selection }}
+          token: ${{ steps.auth.outputs.token }}
+
+  publish-pypi:
+    needs: [gate, build]
+    if: needs.gate.outputs.pypi == 'true'
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release--*
+          path: dist
+      - uses: buchochelliq-labs/release-kit/publish-pypi@v1
+        with:
+          selection: ${{ needs.gate.outputs.selection }}
+
+  publish-npm:
+    needs: [gate, ci]
+    if: needs.gate.outputs.npm == 'true'
+    runs-on: ubuntu-latest
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: https://registry.npmjs.org
+      - run: npm ci
+      - uses: buchochelliq-labs/release-kit/publish-npm@v1
+        with:
+          selection: ${{ needs.gate.outputs.selection }}
+
+  publish-vscode:
+    needs: [gate, build]
+    if: needs.gate.outputs.vscode == 'true'
+    runs-on: ubuntu-latest
+    environment: vscode-marketplace
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release--*
+          path: dist
+      - uses: buchochelliq-labs/release-kit/publish-vscode@v1
+        with:
+          selection: ${{ needs.gate.outputs.selection }}
+          vsce-token: ${{ secrets.VSCE_PAT }}
+          ovsx-token: ${{ secrets.OVSX_PAT }}

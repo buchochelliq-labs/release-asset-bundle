@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The standard asks every repository's CI to be callable on a given commit,
+  # so a release reruns it on the tagged commit (templates/release.yml).
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to check out
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"   # the oldest Python release.py supports
+      - name: Unit tests
+        run: |
+          python3 -m pip install --quiet pyyaml
+          git config --global user.name ci
+          git config --global user.email ci@example.invalid
+          python3 -m unittest discover -s tests -v
+      - name: Lint the workflows, the template and the actions' scripts
+        run: |
+          pip install -q actionlint-py shellcheck-py pyyaml
+          actionlint .github/workflows/*.yml templates/*.yml
+          python3 tests/extract_scripts.py lint-scripts
+          shellcheck -S warning lint-scripts/*.sh
