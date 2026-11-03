@@ -69,7 +69,3 @@ package.
 `consume --registry npm` runs `npm view <name>@<version> version` in a fresh
 directory with no token, retried up to 10 times, 30 seconds apart.
 
-!!! warning "Known issue in the current action"
-    The `publish-npm` action runs `consume` only in a verify-only run (where it
-    runs it twice). After a normal upload it runs `verify` but not `consume`.
-    A verify-only run after the release does the consumer check.

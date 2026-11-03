@@ -291,10 +291,10 @@ wheel built on Apple Silicon, for example):
           targets: [x86_64-unknown-linux-gnu, aarch64-apple-darwin]
 ```
 
-A mapping without `targets` runs after every job, like a string. For kinds
-without targets (`python`, `vsix`, `command`), use a string or a mapping
-without `targets`: their jobs have no target, so a mapping that lists targets
-never matches them. The sdist job of a `maturin` artifact runs no test.
+A mapping without `targets` runs after every job, like a string. Kinds that
+are not built per target (`python`, `vsix`, `command`) take a string, or a
+mapping without `targets`; `check` refuses `targets` there. The sdist job of a
+`maturin` artifact runs no test.
 
 ### What each job produces
 

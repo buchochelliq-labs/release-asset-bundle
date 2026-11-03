@@ -457,6 +457,8 @@ def artifact_errors(package):
                 isinstance(test, dict) and isinstance(test.get("run"), str)
                 and set(test) <= {"run", "targets"})):
             errors.append(f"{where}: test is a command, or {{run: ..., targets: [...]}}")
+        elif isinstance(test, dict) and test.get("targets") and kind not in ("rust-binary", "maturin"):
+            errors.append(f"{where}: {kind} is not built per target; give test as a command")
         if kind in ("rust-binary", "maturin"):
             for target, runner in targets_of(artifact):
                 if not runner:
@@ -989,8 +991,8 @@ def consume(registry, selection, runner=None, read=None, tries=10, sleep=time.sl
 
 
 # ---------------------------------------------------------------------------
-# Installing: repositories use a copy of the kit (release-kit is private, and
-# GitHub lets public repositories use only public actions and workflows).
+# Installing: repositories use a copy of the kit, pinned and reviewable: a
+# repository's release changes only when it installs a newer kit.
 
 KIT = Path(__file__).resolve().parent.parent
 VENDOR = ".github/release-kit"

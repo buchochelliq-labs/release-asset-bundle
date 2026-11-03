@@ -116,8 +116,13 @@ jobs:
   # preflight found a new crate. Add each new crate's Trusted Publisher once
   # it is up.
   publish-crates:
-    needs: [gate, ci]
-    if: needs.gate.outputs.crates-io == 'true'
+    # From source, but after the build: a release whose artifacts fail to
+    # build (or fail their tests) publishes nothing anywhere.
+    needs: [gate, ci, build]
+    if: >-
+      !cancelled() && needs.gate.outputs.crates-io == 'true' && needs.ci.result == 'success'
+      && (needs.build.result == 'success'
+          || (needs.build.result == 'skipped' && needs.gate.outputs.verify-only == 'true'))
     runs-on: ubuntu-latest
     environment: crates-io          # the Trusted Publisher is bound to it
     permissions:
@@ -183,8 +188,11 @@ jobs:
           verify-only: ${{ needs.gate.outputs.verify-only }}
 
   publish-npm:
-    needs: [gate, ci]
-    if: needs.gate.outputs.npm == 'true'
+    needs: [gate, ci, build]
+    if: >-
+      !cancelled() && needs.gate.outputs.npm == 'true' && needs.ci.result == 'success'
+      && (needs.build.result == 'success'
+          || (needs.build.result == 'skipped' && needs.gate.outputs.verify-only == 'true'))
     runs-on: ubuntu-latest
     environment: npm
     permissions:

@@ -5,11 +5,11 @@ from [`templates/release.yml`](https://github.com/buchochelliq-labs/release-kit/
 when the repository has none. After that it is the repository's own file.
 
 ```text
-gate ──▶ ci ──┬──▶ build ──┬──▶ publish-github
-              │            ├──▶ publish-pypi
-              │            └──▶ publish-vscode
-              ├──▶ publish-crates
-              └──▶ publish-npm
+gate ──▶ ci ──▶ build ──┬──▶ publish-github
+                        ├──▶ publish-pypi
+                        ├──▶ publish-vscode
+                        ├──▶ publish-crates
+                        └──▶ publish-npm
 ```
 
 ## Triggers
@@ -128,15 +128,18 @@ publish action.
 
 ### `publish-crates`, `publish-npm`
 
-These publish from source, so they need only `gate` and `ci`, and run
-alongside the build:
+These publish from source, but still wait for the build, with the same
+condition as the other publish jobs: a release whose artifacts fail to build
+or fail their tests publishes nothing anywhere.
 
 ```yaml
-    needs: [gate, ci]
-    if: needs.gate.outputs.crates-io == 'true'
+    needs: [gate, ci, build]
+    if: >-
+      !cancelled() && needs.gate.outputs.crates-io == 'true' && needs.ci.result == 'success'
+      && (needs.build.result == 'success'
+          || (needs.build.result == 'skipped' && needs.gate.outputs.verify-only == 'true'))
 ```
-
-A failed build does not stop them. `publish-crates` installs stable Rust, runs
+ `publish-crates` installs stable Rust, runs
 `preflight`, requests a Trusted Publishing token only when an existing crate
 is selected, and passes `CARGO_REGISTRY_TOKEN` only when a new one is; see
 [crates.io](registries/crates-io.md). `publish-npm` installs Node 24 with the

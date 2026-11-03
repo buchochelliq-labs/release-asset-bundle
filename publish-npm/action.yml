@@ -27,7 +27,6 @@ runs:
         kit="$GITHUB_ACTION_PATH/../scripts/release.py"
         if [ "$VERIFY_ONLY" = true ]; then
           python3 "$kit" verify --registry npm --selection "$SELECTION"
-        python3 "$kit" consume --registry npm --selection "$SELECTION"
           python3 "$kit" consume --registry npm --selection "$SELECTION"
           exit 0
         fi
@@ -40,3 +39,4 @@ runs:
           ( cd "$(dirname "$manifest")" && npm publish --provenance --access public )
         done
         python3 "$kit" verify --registry npm --selection "$SELECTION"
+        python3 "$kit" consume --registry npm --selection "$SELECTION"

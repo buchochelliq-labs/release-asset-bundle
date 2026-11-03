@@ -80,6 +80,12 @@ set, before anything can publish them.
 stops while the run is still live, it names the run; running `tag` again keeps
 waiting and changes nothing while the run is live.
 
+**Every publish job waits for the build.** `publish-crates` and `publish-npm`
+now need `build` too, so a release whose artifacts fail to build or fail their
+`test` publishes nothing anywhere. `publish-npm` runs `consume` after a normal
+upload, and once in a verify-only run. `check` refuses `test.targets` on kinds
+that are not built per target, where it could never match.
+
 **Documentation.** This site, built with Zensical from `mkdocs.yml` and
 published to GitHub Pages by `.github/workflows/docs.yml`. The README is now a
 short summary that links here, and no longer claims the repository is

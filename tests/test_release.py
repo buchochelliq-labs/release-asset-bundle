@@ -493,6 +493,11 @@ class ArtifactTests(unittest.TestCase):
                  "release-kit.yml": 'packages:\n  - name: app\n    registry: github\n    manifest: bin/Cargo.toml\n'
                                     '    version: "1.0.0"\n    artifacts: [{kind: rust-binary, bin: app, test: {cmd: x}}]\n'}
         self.assertTrue(any("test is a command" in e for e in release.check(reader(files))))
+        files["release-kit.yml"] = files["release-kit.yml"].replace(
+            "kind: rust-binary, bin: app, test: {cmd: x}",
+            "kind: command, run: make, outputs: '*.txt', test: {run: x, targets: [x86_64-unknown-linux-gnu]}")
+        self.assertTrue(any("command is not built per target" in e for e in release.check(reader(files))),
+                        "targets would never match a job that has no target")
 
     def test_a_failing_test_fails_the_build(self):
         with tempfile.TemporaryDirectory() as d:
