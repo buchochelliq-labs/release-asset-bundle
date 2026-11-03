@@ -332,6 +332,61 @@ class Gate(Repo):
             self.gate("release-0.2.0")
 
 
+class Foreign(Repo):
+    """#4: a tag made for something else, or before release-kit, is refused clearly."""
+
+    def foreign_tag(self, name, subject):
+        old = sh(self.work, "git", "rev-parse", "HEAD")
+        sh(self.work, "git", "tag", "-a", name, "-m", f"{subject}\n\nRelease: x\nCommit: {old}\n", old)
+        sh(self.work, "git", "push", "-q", "origin", f"refs/tags/{name}")
+        sh(self.work, "git", "tag", "-d", name)
+        self.write({"crates/core/src/lib.rs": "pub fn core() { /* later */ }\n"})
+        return self.commit("later")
+
+    def test_another_packages_tag_of_the_same_name_is_refused(self):
+        # As a crate's legacy record `rs-rich 0.0.12` collides with PyPI's rs-rich 0.0.12.
+        self.foreign_tag("core-v0.1.0", "core 0.1.0")
+        with self.assertRaisesRegex(RuntimeError, "core-v0.1.0 at .*not core 0.1.0 .crates.io.'s record"):
+            self.tag()
+
+    def test_the_gate_refuses_it_too(self):
+        later = self.foreign_tag("core-v0.1.0", "core 0.1.0")
+        sh(self.work, "git", "tag", "-a", "release-0.2.0", "-m", f"Release 0.2.0\n\nRelease: 0.2.0\nCommit: {later}\n")
+        out = Path(self.dir.name) / "out"
+        out.write_text("")
+        with self.assertRaisesRegex(RuntimeError, "already exist for something else"):
+            release.gate("release-0.2.0", status=self.status, output=out)
+
+    def test_a_commit_without_release_kit_yml_is_named(self):
+        sh(self.work, "git", "rm", "-q", "release-kit.yml")
+        old = self.commit("before release-kit")
+        with self.assertRaisesRegex(RuntimeError, "core-v0.1.0 is on .*which has no release-kit.yml: the tag predates"):
+            release.release_at(old, release.Package("core", "crates.io", "m", "0.1.0"))
+
+
+class VerifyOnly(Repo):
+    """#6: a verify-only run re-checks a finished upload and selects it all."""
+
+    def gate(self):
+        out = Path(self.dir.name) / "out"
+        out.write_text("")
+        release.gate("release-0.2.0", status=self.status, output=out, verify_only=True)
+        return dict(line.split("=", 1) for line in out.read_text().splitlines())
+
+    def test_every_published_package_of_the_release_is_selected(self):
+        self.tag()
+        self.published.update({("core", "0.1.0"), ("tool", "0.2.0")})
+        outputs = self.gate()
+        self.assertEqual([s["name"] for s in json.loads(outputs["selection"])], ["core", "tool"])
+        self.assertEqual((outputs["verify-only"], outputs["crates-io"]), ("true", "true"))
+
+    def test_a_partial_upload_is_left_to_tag(self):
+        self.tag()
+        self.published.add(("core", "0.1.0"))
+        with self.assertRaisesRegex(RuntimeError, "not published: tool 0.2.0.*Run `release.py tag` again"):
+            self.gate()
+
+
 class PublishSteps(unittest.TestCase):
     selection = json.dumps([{"name": "core", "registry": "crates.io", "version": "0.1.0",
                              "manifest": "crates/core/Cargo.toml", "tag": "core-v0.1.0"},
@@ -346,6 +401,144 @@ class PublishSteps(unittest.TestCase):
     def test_verify_waits_until_the_registry_has_it(self):
         answers = iter([False, False, True])
         release.verify("crates.io", self.selection, status=lambda p: next(answers), sleep=lambda s: None)
+
+
+class NewCrates(unittest.TestCase):
+    """#3: a crate's first version publishes with the new-crate token."""
+    selection = json.dumps([
+        {"name": n, "registry": "crates.io", "version": "0.1.0", "manifest": f"crates/{n}/Cargo.toml",
+         "tag": f"{n}-v0.1.0"} for n in ("core", "fresh", "tool", "app")])
+
+    def test_preflight_says_which_crates_are_new(self):
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "out"
+            out.write_text("")
+            release.preflight("crates.io", self.selection, status=lambda p: False,
+                              exists=lambda name: name not in {"fresh", "app"}, output=out)
+            outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
+        self.assertEqual(json.loads(outputs["new_crates"]), ["fresh", "app"])
+        self.assertEqual((outputs["new_crate"], outputs["existing_crate"]), ("true", "true"))
+
+    def test_runs_of_crates_sharing_a_credential_publish_in_order(self):
+        calls = []
+        groups = release.publish_crates(self.selection, json.dumps(["fresh", "app"]), "trusted-t", "new-t",
+                                        runner=lambda cmd, **kw: calls.append((cmd, kw["env"])))
+        self.assertEqual(groups, [("trusted", ["core"]), ("new", ["fresh"]), ("trusted", ["tool"]),
+                                  ("new", ["app"])])
+        self.assertEqual(calls[0][0][:4], ["cargo", "publish", "--dry-run", "--locked"])
+        self.assertEqual(calls[0][1], {"CARGO_REGISTRY_TOKEN": ""}, "the dry run uploads nothing")
+        self.assertEqual([(c[c.index("-p") + 1], e["CARGO_REGISTRY_TOKEN"]) for c, e in calls[1:]],
+                         [("core", "trusted-t"), ("fresh", "new-t"), ("tool", "trusted-t"), ("app", "new-t")])
+
+    def test_a_missing_token_is_refused_before_any_upload(self):
+        calls = []
+        with self.assertRaisesRegex(RuntimeError, "missing the new-crate token"):
+            release.publish_crates(self.selection, json.dumps(["fresh"]), "trusted-t", "",
+                                   runner=lambda cmd, **kw: calls.append(cmd))
+        self.assertEqual(calls, [])
+        # With no new crate, the new-crate token is not needed.
+        release.publish_crates(self.selection, "[]", "trusted-t", "", runner=lambda cmd, **kw: calls.append(cmd))
+        self.assertEqual(len(calls), 2)
+
+
+class Consumer(unittest.TestCase):
+    """#6: a published package is used as a stranger would."""
+    selection = json.dumps([
+        {"name": "core", "registry": "crates.io", "version": "0.1.0", "manifest": "crates/core/Cargo.toml",
+         "tag": "core-v0.1.0"},
+        {"name": "tool", "registry": "crates.io", "version": "0.2.0", "manifest": "crates/tool/Cargo.toml",
+         "tag": "tool-v0.2.0"},
+        {"name": "pkg", "registry": "pypi", "version": "1.0", "manifest": "p.toml", "tag": "python-v1.0"}])
+
+    def test_a_binary_is_installed_and_a_library_is_built_against(self):
+        calls = []
+        release.consume("crates.io", self.selection, runner=lambda cmd, **kw: calls.append((cmd, kw.get("env"))),
+                        read=reader(FILES))
+        commands = [c[:3] for c, _ in calls]
+        self.assertEqual(commands, [["cargo", "new", "--quiet"], ["cargo", "add", "core@=0.1.0"],
+                                    ["cargo", "check", "--quiet"], ["cargo", "install", "tool"]])
+        install = calls[-1][0]
+        self.assertEqual(install[install.index("--version") + 1], "=0.2.0")
+        self.assertIn("--locked", install)
+        self.assertTrue(all(env["CARGO_REGISTRY_TOKEN"] == "" for _, env in calls), "no credentials")
+
+    def test_a_lagging_index_is_retried_then_reported(self):
+        tries = []
+
+        def runner(cmd, **kw):
+            if "install" in cmd:
+                tries.append(cmd)
+                raise subprocess.CalledProcessError(1, cmd)
+        with self.assertRaisesRegex(RuntimeError, "installing pkg 1.0 .pypi. failed 3 times"):
+            release.consume("pypi", self.selection, runner=runner, tries=3, sleep=lambda s: None)
+        self.assertEqual(len(tries), 3)
+
+
+class ArtifactTests(unittest.TestCase):
+    """#7: an artifact's own test runs on what was built, before publishing."""
+
+    def test_the_plan_carries_the_test_to_the_targets_it_names(self):
+        files = {"py/pyproject.toml": '[project]\nname = "pkg"\nversion = "1.0"\n',
+                 "release-kit.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
+                                    '    version: "1.0"\n    artifacts:\n      - kind: maturin\n'
+                                    '        targets: [x86_64-unknown-linux-gnu, x86_64-apple-darwin]\n'
+                                    '        test: {run: "pytest", targets: [x86_64-unknown-linux-gnu]}\n'}
+        self.assertEqual(release.check(reader(files)), [])
+        jobs = release.plan(json.dumps([{"name": "pkg", "registry": "pypi"}]), read=reader(files))
+        self.assertEqual({j["target"]: j["test"] for j in jobs},
+                         {"x86_64-unknown-linux-gnu": "pytest", "x86_64-apple-darwin": None, "": None})
+
+    def test_a_malformed_test_is_refused(self):
+        files = {"bin/Cargo.toml": '[package]\nname = "app"\nversion = "1.0.0"\n',
+                 "release-kit.yml": 'packages:\n  - name: app\n    registry: github\n    manifest: bin/Cargo.toml\n'
+                                    '    version: "1.0.0"\n    artifacts: [{kind: rust-binary, bin: app, test: {cmd: x}}]\n'}
+        self.assertTrue(any("test is a command" in e for e in release.check(reader(files))))
+
+    def test_a_failing_test_fails_the_build(self):
+        with tempfile.TemporaryDirectory() as d:
+            cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                job = {"id": "app-command-0", "kind": "command", "package": "app", "slug": "app",
+                       "version": "1.0.0", "registry": "github", "run": "mkdir -p b && echo hi > b/n.txt",
+                       "outputs": "b/*.txt", "test": 'grep -q hi "$DIST/n.txt" && test "$VERSION" = 1.0.0'}
+                self.assertEqual([p.name for p in release.build(job, Path(d) / "dist")], ["n.txt"])
+                job["test"] = "exit 3"
+                with self.assertRaises(subprocess.CalledProcessError):
+                    release.build(job, Path(d) / "dist2")
+            finally:
+                os.chdir(cwd)
+
+
+class Timeout(unittest.TestCase):
+    """#8: running out of time while the run is live says how to go on."""
+
+    def test_a_live_run_is_named_when_tag_stops_waiting(self):
+        live = {"status": "in_progress", "conclusion": "", "url": "https://run", "head_sha": "x",
+                "publish_started": True}
+        package = release.Package("core", "crates.io", "m", "0.1.0")
+        with self.assertRaisesRegex(RuntimeError, "still going .https://run.; run `release.py tag` again"):
+            release.wait_for("release-0.1.0", [package], 0, status=lambda p: False, run=lambda t: live,
+                             sleep=lambda s: None)
+
+
+class Pinned(unittest.TestCase):
+    """#5: every third-party action is pinned to a commit, with its version."""
+
+    def test_every_uses_is_local_or_a_commit(self):
+        import re
+        kit = Path(__file__).resolve().parent.parent
+        files = [*kit.glob("*/action.yml"), *kit.glob("workflows/*.yml"), *kit.glob("templates/*.yml"),
+                 *kit.glob(".github/workflows/*.yml")]
+        loose = []
+        for file in files:
+            for number, line in enumerate(file.read_text().splitlines(), 1):
+                found = re.search(r"uses:\s*(\S+)", line)
+                if not found or found[1].startswith("./"):
+                    continue
+                if not re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", found[1]) or "#" not in line:
+                    loose.append(f"{file.relative_to(kit)}:{number}: {found[1]}")
+        self.assertEqual(loose, [], "pin to a full commit SHA with a `# vX.Y.Z` comment")
 
 
 class Install(unittest.TestCase):

@@ -6,7 +6,10 @@
 #
 # `python3 .github/release-kit/scripts/release.py tag` on the default branch
 # pushes the tags; the release tag starts this run, which checks it once, runs
-# CI once on the tagged commit, builds, and publishes what is not yet published.
+# CI once on the tagged commit, builds, publishes what is not yet published,
+# and then uses each package as a stranger would.
+#
+# Third-party actions are pinned to commits (the version is in the comment).
 name: release
 
 on:
@@ -17,6 +20,12 @@ on:
       tag:
         description: An existing release tag (release-X.Y.Z) to run again
         required: true
+      verify_only:
+        description: >-
+          Verify only: every package is already published (a run that failed
+          after uploading); check them again and upload nothing
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -33,23 +42,27 @@ jobs:
       sha: ${{ steps.gate.outputs.sha }}
       release: ${{ steps.gate.outputs.release }}
       selection: ${{ steps.gate.outputs.selection }}
+      verify-only: ${{ steps.gate.outputs.verify-only }}
       github: ${{ steps.gate.outputs.github }}
       crates-io: ${{ steps.gate.outputs.crates-io }}
       pypi: ${{ steps.gate.outputs.pypi }}
       npm: ${{ steps.gate.outputs.npm }}
       vscode: ${{ steps.gate.outputs.vscode }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
       - id: gate
         uses: ./.github/release-kit/gate
         with:
           tag: ${{ inputs.tag || github.ref_name }}
+          verify-only: ${{ inputs.verify_only == true }}
 
   # The repository's own CI on the tagged commit: ci.yml needs
-  # `on: workflow_call` with a `ref` input it checks out.
+  # `on: workflow_call` with a `ref` input it checks out. (Rename `ref` here
+  # if your ci.yml calls it something else.)
   ci:
     needs: gate
     uses: ./.github/workflows/ci.yml
@@ -57,32 +70,51 @@ jobs:
       ref: ${{ needs.gate.outputs.sha }}
 
   # Builds what release-kit.yml's `artifacts` declare, for the packages due,
-  # from the tagged commit: one job per artifact and target.
+  # from the tagged commit: one job per artifact and target, each running the
+  # artifact's `test` (if any) on what it built. Skipped in a verify-only run.
   build:
     needs: [gate, ci]
+    if: needs.gate.outputs.verify-only != 'true'
     uses: ./.github/workflows/release-kit-build.yml
     with:
       sha: ${{ needs.gate.outputs.sha }}
       selection: ${{ needs.gate.outputs.selection }}
 
   publish-github:
-    needs: [gate, build]
-    if: needs.gate.outputs.github == 'true'
+    needs: [gate, ci, build]
+    # After a successful build; in a verify-only run, after CI (build skipped).
+    if: >-
+      !cancelled() && needs.gate.outputs.github == 'true' && needs.ci.result == 'success'
+      && (needs.build.result == 'success'
+          || (needs.build.result == 'skipped' && needs.gate.outputs.verify-only == 'true'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.gate.outputs.sha }}
-      - uses: actions/download-artifact@v4
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet pyyaml
+      - if: needs.gate.outputs.verify-only != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release--*
           path: dist
       - uses: ./.github/release-kit/publish-github
         with:
           selection: ${{ needs.gate.outputs.selection }}
+          verify-only: ${{ needs.gate.outputs.verify-only }}
 
+  # crates.io publishes from source. Crates already on crates.io upload with
+  # Trusted Publishing; a crate's first version cannot (crates.io offers it
+  # only for an existing crate), so it uploads with the environment's
+  # CARGO_REGISTRY_TOKEN secret, which reaches the step only when the
+  # preflight found a new crate. Add each new crate's Trusted Publisher once
+  # it is up.
   publish-crates:
     needs: [gate, ci]
     if: needs.gate.outputs.crates-io == 'true'
@@ -92,36 +124,63 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.gate.outputs.sha }}
-      - uses: dtolnay/rust-toolchain@stable
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: stable
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet pyyaml
+      # Refuses a version already out, and says which crates are new.
+      - id: preflight
+        if: needs.gate.outputs.verify-only != 'true'
+        env:
+          SELECTION: ${{ needs.gate.outputs.selection }}
+        run: python3 .github/release-kit/scripts/release.py preflight --registry crates.io --selection "$SELECTION"
       - id: auth
-        uses: rust-lang/crates-io-auth-action@v1
+        if: steps.preflight.outputs.existing_crate == 'true'
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
       - uses: ./.github/release-kit/publish-crates
         with:
           selection: ${{ needs.gate.outputs.selection }}
+          new-crates: ${{ steps.preflight.outputs.new_crates || '[]' }}
           token: ${{ steps.auth.outputs.token }}
+          new-crate-token: ${{ steps.preflight.outputs.new_crate == 'true' && secrets.CARGO_REGISTRY_TOKEN || '' }}
+          verify-only: ${{ needs.gate.outputs.verify-only }}
 
   publish-pypi:
-    needs: [gate, build]
-    if: needs.gate.outputs.pypi == 'true'
+    needs: [gate, ci, build]
+    if: >-
+      !cancelled() && needs.gate.outputs.pypi == 'true' && needs.ci.result == 'success'
+      && (needs.build.result == 'success'
+          || (needs.build.result == 'skipped' && needs.gate.outputs.verify-only == 'true'))
     runs-on: ubuntu-latest
     environment: pypi
     permissions:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.gate.outputs.sha }}
-      - uses: actions/download-artifact@v4
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet pyyaml
+      - if: needs.gate.outputs.verify-only != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release--*
           path: dist
       - uses: ./.github/release-kit/publish-pypi
         with:
           selection: ${{ needs.gate.outputs.selection }}
+          verify-only: ${{ needs.gate.outputs.verify-only }}
 
   publish-npm:
     needs: [gate, ci]
@@ -132,31 +191,47 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.gate.outputs.sha }}
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
-      - run: npm ci
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet pyyaml
+      - if: needs.gate.outputs.verify-only != 'true'
+        run: npm ci
       - uses: ./.github/release-kit/publish-npm
         with:
           selection: ${{ needs.gate.outputs.selection }}
+          verify-only: ${{ needs.gate.outputs.verify-only }}
 
   publish-vscode:
-    needs: [gate, build]
-    if: needs.gate.outputs.vscode == 'true'
+    needs: [gate, ci, build]
+    if: >-
+      !cancelled() && needs.gate.outputs.vscode == 'true' && needs.ci.result == 'success'
+      && (needs.build.result == 'success'
+          || (needs.build.result == 'skipped' && needs.gate.outputs.verify-only == 'true'))
     runs-on: ubuntu-latest
     environment: vscode-marketplace
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.gate.outputs.sha }}
-      - uses: actions/setup-node@v4
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
-      - uses: actions/download-artifact@v4
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet pyyaml
+      - if: needs.gate.outputs.verify-only != 'true'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release--*
           path: dist
@@ -165,3 +240,4 @@ jobs:
           selection: ${{ needs.gate.outputs.selection }}
           vsce-token: ${{ secrets.VSCE_PAT }}
           ovsx-token: ${{ secrets.OVSX_PAT }}
+          verify-only: ${{ needs.gate.outputs.verify-only }}

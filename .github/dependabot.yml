@@ -1,0 +1,23 @@
+# Keeps the pinned actions current: each update is a PR that moves a commit
+# SHA and its version comment together. The kit's own actions (*/action.yml),
+# its build workflow and the starter template are listed, as well as CI.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directories:
+      - "/"
+      - "/gate"
+      - "/plan"
+      - "/build"
+      - "/publish-github"
+      - "/publish-crates"
+      - "/publish-pypi"
+      - "/publish-npm"
+      - "/publish-vscode"
+      - "/workflows"
+      - "/templates"
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
