@@ -1,0 +1,63 @@
+# The release-kit documentation site, built with Zensical:
+#   pip install zensical && zensical build --strict
+# The built site makes no third-party requests: no web fonts, no external
+# scripts, and no repository-statistics widget (so no `repo_url`).
+site_name: release-kit
+site_description: >-
+  The buchochelliq-labs release standard: one file declares what a repository
+  publishes, one command tags a release, one workflow run publishes it.
+site_url: https://buchochelliq-labs.github.io/release-kit/
+docs_dir: docs
+site_dir: site
+copyright: buchochelliq-labs
+
+theme:
+  name: material
+  font: false
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.indexes
+    - content.code.copy
+    - search.highlight
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - def_list
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - pymdownx.inlinehilite
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - release-kit.yml reference: configuration.md
+  - Commands: commands.md
+  - The workflow: workflow.md
+  - Recovering a failed release: recovery.md
+  - Registries:
+      - registries/index.md
+      - GitHub Releases: registries/github.md
+      - crates.io: registries/crates-io.md
+      - PyPI: registries/pypi.md
+      - npm: registries/npm.md
+      - VS Code Marketplace and Open VSX: registries/vscode.md
+  - Migrating from rs-rich-cli: migrating-from-rs-rich-cli.md
+  - Versions and changelog: changelog.md
