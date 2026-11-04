@@ -1,0 +1,10 @@
+[package]
+name = "onto-ods"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "onto-ods"
+
+[dependencies]
+ods-erd = { git = "https://github.com/opendatasuite/open-data-suite" }

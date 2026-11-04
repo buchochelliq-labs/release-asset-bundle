@@ -11,7 +11,9 @@ crates.io packages take no artifacts.
 ```
 
 The `name` must equal the `Cargo.toml` package name, and crates must be
-listed after the listed crates they depend on.
+listed after the listed crates they depend on. `release.py check` also
+refuses a crate that crates.io would refuse: see
+[Publishing to crates.io](publishing-to-crates-io.md).
 
 ## Credentials
 

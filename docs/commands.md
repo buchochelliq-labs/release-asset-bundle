@@ -20,7 +20,7 @@ would do.
 ### `check`
 
 ```sh
-release.py check
+release.py check [--offline] [--publish-dry-run]
 ```
 
 Checks `release-kit.yml` against the repository's manifests: versions,
@@ -28,6 +28,17 @@ names, tag formats, dependency order and artifacts. The full list is in the
 [reference](configuration.md#what-check-refuses). On success it prints
 `release-kit.yml matches the repository (release 0.1.0).`; otherwise it prints
 one problem per line and exits 1. Run it in CI.
+
+For crates.io packages, it then checks what `cargo publish` would refuse:
+manifests, dependencies, who owns the name, and what each package carries
+(see [Publishing to crates.io](registries/publishing-to-crates-io.md)). It
+also warns, on lines starting `warning:`, about library crates in the
+workspace that `release-kit.yml` does not publish. Warnings do not fail it.
+
+| Option | Meaning |
+|---|---|
+| `--offline` | Skip the checks that ask crates.io. `RELEASE_KIT_OFFLINE=1` does the same. |
+| `--publish-dry-run` | Also run `cargo publish --dry-run --locked` over every crates.io package. This builds them, so use it in CI. |
 
 ### `sync`
 
@@ -262,7 +273,10 @@ Just before uploading: refuses if any selected package of `REGISTRY` is
 already published (`already on crates.io: ...; a published version is
 permanent`). Another run may have published it since the gate.
 
-For `crates.io` it also asks crates.io which selected crates do not exist yet,
+For `crates.io` it first runs `check`'s
+[crates.io checks](registries/publishing-to-crates-io.md) on the selected
+crates, and refuses (`not ready for crates.io: ...`) before writing any
+output. Then it asks crates.io which selected crates do not exist yet,
 and writes three outputs:
 
 | Output | Value |

@@ -152,7 +152,8 @@ Add these steps to a job in `ci.yml`:
       - run: python3 .github/release-kit/scripts/release.py vendored
 ```
 
-`check` fails when `release-kit.yml` disagrees with a manifest. `vendored`
+`check` fails when `release-kit.yml` disagrees with a manifest, or when
+crates.io would refuse a crate ([Publishing to crates.io](registries/publishing-to-crates-io.md)). `vendored`
 fails when anyone edits, deletes or adds a file in the installed copy, so the
 copy changes only by installing again.
 

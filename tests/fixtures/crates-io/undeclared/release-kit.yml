@@ -1,0 +1,8 @@
+# A fixture for release.py check's crates.io readiness (tests/test_release.py).
+packages:
+  - name: onto
+    registry: github
+    manifest: crates/onto-cli/Cargo.toml
+    version: "0.1.0"
+    tag: "v{version}"
+    artifacts: [{kind: rust-binary, bin: onto}]

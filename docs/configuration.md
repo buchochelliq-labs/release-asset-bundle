@@ -420,7 +420,13 @@ A `github` package can shape its release:
 - a package listed before a package of the same registry it depends on;
 - artifacts on crates.io or npm packages, no artifacts on the others, an
   unknown kind, a kind its registry cannot publish, a missing or unknown
-  field, a malformed `test`, or a target with no runner.
+  field, a malformed `test`, or a target with no runner;
+- for a crates.io package, anything that would stop `cargo publish`:
+  `publish = false`, a `git` or `path` dependency without a version, a
+  dependency not on crates.io, a name someone else owns, or a file the
+  package does not carry. See
+  [Publishing to crates.io](registries/publishing-to-crates-io.md). This part
+  runs only in `check` (and `preflight`), not in `tag` or the gate.
 
 Before any of that, the file must load. These stop `check` at once: an empty `packages:`, a package missing `name`,
 `registry`, `manifest` or `version`, an unquoted version, `artifacts` that are

@@ -1002,5 +1002,241 @@ class Sync(unittest.TestCase):
             self.assertTrue(text.startswith("# keep me") and 'version: "0.2.1"' in text)
 
 
+FIXTURES = Path(__file__).resolve().parent / "fixtures" / "crates-io"
+HAS_CARGO = bool(release.shutil.which("cargo"))
+
+
+def crates_io(answers):
+    """A fake crates.io from a fixture's crates-io.json: `index` maps a crate to
+    its versions (the sparse index), `crates` maps a crate to its `repository`
+    and `owners` (the API). Anything else is not on crates.io."""
+    def fetch(url):
+        if url.startswith("https://index.crates.io/"):
+            name = url.rsplit("/", 1)[1]
+            versions = answers.get("index", {}).get(name)
+            if versions is None:
+                return 404, b""
+            return 200, "\n".join(json.dumps({"name": name, "vers": v, "yanked": False}) for v in versions).encode()
+        name = url.split("/api/v1/crates/")[1].split("/")[0]
+        crate = answers.get("crates", {}).get(name)
+        if crate is None:
+            return 404, b""
+        if url.endswith("/owners"):
+            return 200, json.dumps({"users": [{"login": o} for o in crate["owners"]]}).encode()
+        return 200, json.dumps({"crate": {"name": crate.get("name", name),
+                                          "repository": crate.get("repository")}}).encode()
+    return fetch
+
+
+@unittest.skipUnless(HAS_CARGO, "needs cargo")
+class CratesIoReadiness(unittest.TestCase):
+    """#11: a crate crates.io would refuse is refused by `check`, with the fix,
+    before the tag. One fixture repository per case, under tests/fixtures."""
+
+    def fixture(self, name, config=None):
+        self.dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.dir.cleanup)
+        base = Path(self.dir.name) / name
+        release.shutil.copytree(FIXTURES / name, base)
+        if config:
+            (base / "release-kit.yml").write_text((base / config).read_text())
+        self.answers = json.loads((base / "crates-io.json").read_text())
+        return base
+
+    def readiness(self, base, repo="acme/ontology", **kw):
+        read = release.files_on_disk(base)
+        self.assertEqual(release.check(read), [], "release-kit.yml itself is fine")
+        kw.setdefault("fetch", crates_io(self.answers))
+        return release.crates_io_readiness(release.load(read), base, repo=repo, offline_mode=False, **kw)
+
+    def test_the_ready_repository_passes(self):
+        # A path dependency with a version, an embed the crate carries, and an
+        # embed from outside it in test code only, which cargo publish does
+        # not build. onto-core is owned by a member of acme, and names acme's
+        # repository; onto-cli is new.
+        self.assertEqual(self.readiness(self.fixture("ready")), ([], []))
+
+    def test_publish_false_or_another_registry_is_refused(self):
+        errors, _ = self.readiness(self.fixture("publish-false"))
+        self.assertEqual(errors, [
+            "onto-core: crates/onto-core/Cargo.toml publishes only to internal (`publish = [...]`); "
+            "add \"crates-io\" to the list, or remove `publish`",
+            "onto: crates/onto/Cargo.toml says `publish = false`, so cargo will not publish it; remove that line "
+            "(or take the package out of release-kit.yml to keep the crate private)"])
+
+    def test_a_git_dependency_without_a_version_is_refused(self):
+        errors, _ = self.readiness(self.fixture("git-dependency"))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("onto-ods: depends on ods-erd from git (https://github.com/opendatasuite/open-data-suite) "
+                      "with no version, and crates.io refuses git dependencies. Publish ods-erd to crates.io first, "
+                      "then give the dependency a `version`", errors[0])
+
+    def test_a_path_dependency_without_a_version_is_refused(self):
+        errors, _ = self.readiness(self.fixture("path-without-version"))
+        self.assertEqual(errors, ["onto-cli: depends on onto-core by path with no version; crates.io needs one: "
+                                  "onto-core = { path = \"../onto-core\", version = \"0.1.0\" }"])
+
+    def test_a_dependency_must_be_on_crates_io_or_released_first(self):
+        base = self.fixture("unpublished-dependency")
+        errors, warnings = self.readiness(base)
+        self.assertEqual(errors, [
+            "onto-ods: depends on ods-erd ^0.3, which is not on crates.io; publish ods-erd first (from its own "
+            "repository), or list it in release-kit.yml (registry: crates.io) before onto-ods"])
+        self.assertIn("library crates release-kit.yml does not publish: ods-erd.", warnings[0])
+        self.answers["index"] = {"ods-erd": ["0.2.0", "0.4.0"]}
+        errors, _ = self.readiness(base)
+        self.assertIn("onto-ods: depends on ods-erd ^0.3, but crates.io has no matching version (newest: 0.4.0)",
+                      errors[0])
+        self.answers["index"] = {"ods-erd": ["0.2.0", "0.3.1"]}
+        self.assertEqual(self.readiness(base)[0], [])
+        # Or this release publishes it first.
+        self.answers["index"] = {}
+        config = (base / "release-kit.yml").read_text()
+        (base / "release-kit.yml").write_text(config.replace("packages:\n", "packages:\n  - name: ods-erd\n"
+                                              "    registry: crates.io\n    manifest: crates/ods-erd/Cargo.toml\n"
+                                              "    version: \"0.3.0\"\n"))
+        self.assertEqual(self.readiness(base), ([], []))
+
+    def test_a_name_someone_else_owns_is_refused(self):
+        errors, _ = self.readiness(self.fixture("taken-name"))
+        self.assertEqual(len(errors), 1)
+        self.assertIn("onto: the name is taken on crates.io (owners: someone; repository https://github.com/"
+                      "someone/onto), and acme/ontology cannot publish it. Rename the package (e.g. onto-cli, "
+                      "keeping the command with [[bin]] name = \"onto\")", errors[0])
+
+    def test_an_embed_from_outside_the_crate_is_refused(self):
+        errors, _ = self.readiness(self.fixture("outside-embed"))
+        self.assertEqual(errors, [
+            "onto-cli: src/main.rs embeds ../../../skills/onto.md, outside the crate; a package carries only its "
+            "crate directory. Copy the file into the crate (and add a test that the copy matches the original)"])
+
+    def test_library_crates_published_nowhere_are_a_warning(self):
+        self.assertEqual(self.readiness(self.fixture("undeclared")), ([], [
+            "library crates release-kit.yml does not publish: onto-core (publish = false), onto-ods. To publish "
+            "one, list it with registry: crates.io; a crate meant to stay private needs nothing"]))
+
+    def test_open_data_suite_ontology_before_its_48_is_refused_at_check(self):
+        repo = "opendatasuite/open-data-suite-ontology"
+        # As it was, only GitHub binaries: its library crates are pointed out.
+        errors, warnings = self.readiness(self.fixture("ods-before-48"), repo=repo)
+        self.assertEqual(errors, [])
+        self.assertIn("does not publish: onto-core (publish = false), onto-ods (publish = false)", warnings[0])
+        # With its crates declared for crates.io, every blocker #48 fixed by hand.
+        errors = "\n".join(self.readiness(self.fixture("ods-before-48", "release-kit.crates-io.yml"),
+                                          repo=repo)[0])
+        for problem in ["onto-core: crates/onto-core/Cargo.toml says `publish = false`",
+                        "onto-ods: depends on ods-erd from git",
+                        "onto-ods: depends on onto-core by path with no version",
+                        "onto: depends on onto-ods by path with no version",
+                        "onto: the name is taken on crates.io",
+                        "onto: src/main.rs embeds ../../../skills/onto.md, outside the crate"]:
+            self.assertIn(problem, errors)
+
+    def test_offline_nothing_asks_crates_io(self):
+        def no_network(url):
+            raise AssertionError(f"asked {url}")
+        base = self.fixture("unpublished-dependency")
+        read = release.files_on_disk(base)
+        self.assertEqual(release.crates_io_readiness(release.load(read), base, fetch=no_network, repo="acme/o",
+                                                     offline_mode=True)[0], [])
+        base = self.fixture("git-dependency")
+        read = release.files_on_disk(base)
+        errors, _ = release.crates_io_readiness(release.load(read), base, fetch=no_network, repo="acme/o",
+                                                offline_mode=True)
+        self.assertIn("onto-ods: depends on ods-erd from git", errors[0])
+
+    def test_the_check_command_refuses_with_the_fix(self):
+        base = self.fixture("git-dependency")
+        sh(base, "git", "init", "-q")
+        cwd = os.getcwd()
+        os.chdir(base)
+        self.addCleanup(os.chdir, cwd)
+        from contextlib import redirect_stderr
+        import io
+        err = io.StringIO()
+        with redirect_stderr(err):
+            self.assertEqual(release.main(["check", "--offline"]), 1)
+        self.assertIn("onto-ods: depends on ods-erd from git", err.getvalue())
+        (base / "crates/onto-ods/Cargo.toml").write_text(
+            (base / "crates/onto-ods/Cargo.toml").read_text().replace('ods-erd = { git', '# ods-erd = { git'))
+        with redirect_stderr(io.StringIO()):
+            self.assertEqual(release.main(["check", "--offline"]), 0)
+
+
+class CratesIoReadinessParts(unittest.TestCase):
+    def test_cargo_version_requirements(self):
+        for requirement, version, matches in [
+                ("0.3", "0.3.7", True), ("0.3", "0.4.0", False), ("^1.2", "1.9.0", True), ("^1.2", "2.0.0", False),
+                ("^0.0.3", "0.0.4", False), ("~1.2.3", "1.2.9", True), ("~1.2.3", "1.3.0", False),
+                ("=1.2.3", "1.2.4", False), ("1.*", "1.5.0", True), (">=1, <2", "2.0.0", False),
+                (">1.2", "1.2.9", False), ("<=1.2", "1.2.9", True), ("*", "3.0.0", True),
+                ("^1.0.0", "1.1.0-rc.1", False), ("^1.1.0-rc.1", "1.1.0-rc.2", True)]:
+            self.assertEqual(release.requirement_matches(requirement, version), matches, (requirement, version))
+
+    def test_the_sparse_index_path(self):
+        self.assertEqual([release.index_url(n) for n in ("a", "ab", "abc", "Serde")],
+                         ["https://index.crates.io/1/a", "https://index.crates.io/2/ab",
+                          "https://index.crates.io/3/a/abc", "https://index.crates.io/se/rd/serde"])
+
+    def test_who_may_publish_a_name(self):
+        def owner(crate, repo="acme/onto"):
+            return release.owner_problem("onto", repo, crates_io({"crates": {"onto": crate}}))
+        self.assertEqual(release.owner_problem("onto", "acme/onto", crates_io({})), (None, None), "a free name")
+        self.assertEqual(owner({"owners": ["Acme"]}), (None, None), "the repository's owner, a user")
+        self.assertEqual(owner({"owners": ["someone", "github:acme:release"]}), (None, None), "a team of the org")
+        self.assertEqual(owner({"owners": ["member"], "repository": "https://github.com/ACME/onto.git"}),
+                         (None, None), "a member's crate that names a repository of the org")
+        self.assertEqual(owner({"owners": ["someone"], "repository": "https://github.com/someone/onto"})[0], "error")
+        kind, message = owner({"owners": ["someone"]})
+        self.assertEqual(kind, "warning", "nothing says whose it is")
+        self.assertIn("cannot tell whether acme/onto may publish it", message)
+        kind, message = owner({"name": "Onto", "owners": ["acme"]})
+        self.assertEqual(kind, "error")
+        self.assertIn("crates.io has the crate Onto", message)
+
+    def test_test_code_is_not_scanned_for_embeds(self):
+        source = ('const A: &str = include_str!("a.txt");\n#[cfg(test)]\nmod tests {\n    fn f() { let _ = '
+                  'include_str!("../../x"); }\n}\n#[test]\nfn g() { include_bytes!("../y"); }\n'
+                  'const B: &[u8] = include_bytes!("b.bin");\n')
+        self.assertEqual(release.EMBED.findall(release.without_tests(source)), [("", "a.txt"), ("", "b.bin")])
+
+    def test_without_cargo_the_checks_are_skipped_with_a_warning(self):
+        which = release.shutil.which
+        release.shutil.which = lambda name: None
+        self.addCleanup(setattr, release.shutil, "which", which)
+        errors, warnings = release.crates_io_readiness(release.load(reader(FILES)), Path("."), repo="acme/o")
+        self.assertEqual(errors, [])
+        self.assertIn("cargo is not installed", warnings[0])
+
+    def test_preflight_refuses_a_crate_that_is_not_ready(self):
+        selection = json.dumps([{"name": "core", "registry": "crates.io", "version": "0.1.0",
+                                 "manifest": "crates/core/Cargo.toml", "tag": "core-v0.1.0"}])
+        asked = []
+
+        def ready(names):
+            asked.append(names)
+            return ["core: depends on x by path with no version"], []
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "out"
+            out.write_text("")
+            with self.assertRaisesRegex(RuntimeError, "not ready for crates.io:\n  core: depends on x"):
+                release.preflight("crates.io", selection, status=lambda p: False, exists=lambda n: True,
+                                  output=out, ready=ready)
+            self.assertEqual((asked, out.read_text()), ([{"core"}], ""), "no outputs, so nothing publishes")
+
+    def test_the_publish_dry_run_covers_every_crate_of_a_workspace(self):
+        calls = []
+        base = Path("/repo")
+
+        def cargo(args, cwd):
+            calls.append((args, cwd))
+            # Both crates are members of the workspace at the root.
+            return subprocess.CompletedProcess(args, 0, stdout="/repo/Cargo.toml\n", stderr="")
+        self.assertIsNone(release.publish_dry_run(release.load(reader(FILES)), base, runner=cargo))
+        self.assertEqual(calls[-1], (["publish", "--dry-run", "--locked", "--allow-dirty",
+                                      "-p", "core", "-p", "tool"], base))
+        self.assertEqual(len(calls), 3, "one locate-project per crate, one dry run per workspace")
+
+
 if __name__ == "__main__":
     unittest.main()

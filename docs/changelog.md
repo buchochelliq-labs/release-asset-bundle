@@ -38,6 +38,23 @@ want, run `install`, and open a PR.
 
 ### Unreleased
 
+**Catch a crate crates.io would refuse at `check`.** For every crates.io
+package, `release.py check` reads the manifests with `cargo metadata` and
+refuses `publish = false` (or other registries only), `git` or `path`
+dependencies without a `version`, dependencies from other registries, a
+dependency that publishing would take from crates.io when crates.io has no
+matching version (unless this release publishes it first), a name someone else
+owns (from the public owners API), a failing `cargo package --list`, and
+`include_str!`-style embeds the package does not carry. Each message names the
+fix. It warns about library crates in the workspace that `release-kit.yml`
+publishes nowhere. `check --offline` (or `RELEASE_KIT_OFFLINE=1`) skips the
+questions to crates.io; `check --publish-dry-run` runs
+`cargo publish --dry-run` over the crates, for CI. `preflight --registry
+crates.io` runs the same checks on the selected crates. New page:
+[Publishing to crates.io](registries/publishing-to-crates-io.md). In a
+Rust repository, `check` now runs cargo and asks crates.io (about one
+request a second); without cargo it warns and skips these checks.
+
 **Promote reviewed CI artifacts.** A new artifact kind, `ci-artifact`,
 publishes the files of a pinned GitHub Actions artifact unchanged instead of
 building them again: for releases that must ship exactly the bytes CI built
