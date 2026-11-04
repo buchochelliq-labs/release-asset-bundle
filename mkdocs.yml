@@ -1,16 +1,13 @@
 # The rab (Release Asset Bundle) documentation site, built with Zensical:
 #   pip install zensical && zensical build --strict
-# The built site loads no web fonts and no external scripts. With `repo_url`
-# the header links the repository, and the reader's browser asks GitHub's API
-# for its statistics: the site's one third-party request.
+# The built site makes no third-party requests: no web fonts, no external
+# scripts, and no repository-statistics widget (so no `repo_url`).
 site_name: rab, the Release Asset Bundle
 site_description: >-
   rab (formerly release-kit), the buchochelliq-labs release standard: one file
   declares what a repository publishes, one command tags a release, one
   workflow run publishes it.
 site_url: https://buchochelliq-labs.github.io/release-asset-bundle/
-repo_url: https://github.com/buchochelliq-labs/release-asset-bundle
-repo_name: buchochelliq-labs/release-asset-bundle
 docs_dir: docs
 site_dir: site
 copyright: buchochelliq-labs
