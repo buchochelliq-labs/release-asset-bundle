@@ -904,6 +904,99 @@ class DraftReleases(unittest.TestCase):
         self.assertTrue(self.status((200, json.dumps({"draft": False, "assets": [{}]}).encode())))
 
 
+class OpenVsx(unittest.TestCase):
+    """#17: with `open-vsx: true`, Open VSX is part of a vscode package's
+    publication: due until both registries have it, uploaded only where it is
+    missing, verified on both. Registries are faked at the HTTP layer."""
+
+    selection = json.dumps([{"name": "org.ext", "registry": "vscode", "version": "1.0.0",
+                             "manifest": "ext/package.json", "tag": "org.ext-v1.0.0", "slug": "org.ext",
+                             "open-vsx": True}])
+    OPEN_VSX = "https://open-vsx.org/api/org/ext/1.0.0"
+
+    def http(self, marketplace, open_vsx, calls=None):
+        """A fake http_status: the Marketplace lists 1.0.0 when `marketplace`,
+        Open VSX answers 200 for it when `open_vsx`."""
+        def status(url, data=None, headers=None):
+            if calls is not None:
+                calls.append(url)
+            if url.startswith("https://marketplace.visualstudio.com/"):
+                self.assertEqual(json.loads(data)["filters"][0]["criteria"][0]["value"], "org.ext")
+                versions = [{"version": "1.0.0"}] if marketplace() else [{"version": "0.9.0"}]
+                return 200, json.dumps({"results": [{"extensions": [{"versions": versions}]}]}).encode()
+            self.assertEqual(url, self.OPEN_VSX)
+            return (200, b"{}") if open_vsx() else (404, b"")
+        from unittest import mock
+        return mock.patch.object(release, "http_status", side_effect=status)
+
+    def preflight(self, marketplace, open_vsx, token=True):
+        with tempfile.TemporaryDirectory() as d, self.http(lambda: marketplace, lambda: open_vsx):
+            out = Path(d) / "out"
+            out.write_text("")
+            release.preflight("vscode", self.selection, output=out, ovsx_token=token)
+            outputs = dict(line.split("=", 1) for line in out.read_text().splitlines())
+        return json.loads(outputs["uploads"])
+
+    def test_it_is_checked_and_only_for_vscode(self):
+        files = {"ext/package.json": json.dumps({"name": "ext", "publisher": "org", "version": "1.0.0"}),
+                 "release-kit.yml": "packages:\n  - name: org.ext\n    registry: vscode\n"
+                                    "    manifest: ext/package.json\n    version: \"1.0.0\"\n"
+                                    "    artifacts: [{kind: vsix}]\n    open-vsx: true\n"}
+        self.assertEqual(release.check(reader(files)), [])
+        self.assertIs(release.load(reader(files)).packages[0].open_vsx, True)
+        files["release-kit.yml"] = files["release-kit.yml"].replace("open-vsx: true", "open-vsx: yes please")
+        self.assertIn("org.ext: open-vsx is true or false", release.check(reader(files)))
+        files = dict(FILES, **{"release-kit.yml": CONFIG + "    open-vsx: true\n"})
+        self.assertIn("tool: open-vsx only applies to a vscode package", release.check(reader(files)))
+
+    def test_the_gate_carries_it_in_the_selection(self):
+        package = release.Package("org.ext", "vscode", "ext/package.json", "1.0.0", open_vsx=True)
+        plain = release.Package("org.other", "vscode", "o/package.json", "1.0.0")
+        release_ = release.Release((package, plain), "org.ext", "release-{release}", "main")
+        with tempfile.TemporaryDirectory() as d:
+            selection = release.gate_outputs("0" * 40, release_, [package, plain], False, Path(d) / "out")["selection"]
+        self.assertEqual([p.open_vsx for p in release.selected("vscode", selection)], [True, False])
+
+    def test_both_missing_is_due_and_uploads_to_both(self):
+        with self.http(lambda: False, lambda: False):
+            self.assertFalse(release.published_on(release.selected("vscode", self.selection)[0]))
+        self.assertEqual(self.preflight(False, False),
+                         [{"name": "org.ext", "version": "1.0.0", "marketplace": True, "open-vsx": True}])
+
+    def test_only_open_vsx_missing_is_due_and_uploads_only_there(self):
+        with self.http(lambda: True, lambda: False):
+            self.assertFalse(release.published_on(release.selected("vscode", self.selection)[0]))
+        self.assertEqual(self.preflight(True, False),
+                         [{"name": "org.ext", "version": "1.0.0", "marketplace": False, "open-vsx": True}])
+
+    def test_only_the_marketplace_missing_uploads_only_there_without_a_token(self):
+        self.assertEqual(self.preflight(False, True, token=False),
+                         [{"name": "org.ext", "version": "1.0.0", "marketplace": True, "open-vsx": False}])
+
+    def test_both_present_is_published_and_refused(self):
+        with self.http(lambda: True, lambda: True):
+            self.assertTrue(release.published_on(release.selected("vscode", self.selection)[0]))
+        with self.assertRaisesRegex(RuntimeError, "already on vscode: org.ext 1.0.0"):
+            self.preflight(True, True)
+
+    def test_an_open_vsx_upload_needs_its_token(self):
+        with self.assertRaisesRegex(RuntimeError, "org.ext: release-kit.yml says open-vsx: true, but no Open VSX"):
+            self.preflight(True, False, token=False)
+
+    def test_verify_waits_for_open_vsx_too(self):
+        answers, calls = iter([False, False, True]), []
+        with self.http(lambda: True, lambda: next(answers), calls):
+            release.verify("vscode", self.selection, sleep=lambda s: None)
+        self.assertEqual(calls.count(self.OPEN_VSX), 3)
+
+    def test_without_it_open_vsx_is_not_asked(self):
+        selection = json.dumps([dict(json.loads(self.selection)[0], **{"open-vsx": False})])
+        calls = []
+        with self.http(lambda: True, lambda: False, calls):
+            release.verify("vscode", selection, sleep=lambda s: None)
+        self.assertNotIn(self.OPEN_VSX, calls)
+
+
 class Timeout(unittest.TestCase):
     """#8: running out of time while the run is live says how to go on."""
 

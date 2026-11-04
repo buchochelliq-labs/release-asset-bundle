@@ -64,8 +64,8 @@ Commands (installing):
                 only by installing again.
 
 Registries: github (GitHub Releases), crates.io, pypi, npm, vscode (Visual
-Studio Marketplace). Artifact kinds: rust-binary, python, maturin, vsix, ci-artifact and
-command. Requires Python 3.11+, git and PyYAML (for release-kit.yml); `tag`
+Studio Marketplace, and Open VSX with `open-vsx: true`). Artifact kinds:
+rust-binary, python, maturin, vsix, ci-artifact and command. Requires Python 3.11+, git and PyYAML (for release-kit.yml); `tag`
 follows runs with the GitHub CLI (`gh`) when it is installed.
 """
 
@@ -139,6 +139,9 @@ class Package:
     artifacts: tuple = field(default=(), compare=False, hash=False)
     # `github` packages only: how the GitHub release is made (GITHUB_OPTIONS).
     github: tuple = field(default=(), compare=False, hash=False)
+    # `vscode` packages only: `open-vsx: true` publishes to Open VSX too, and
+    # the version counts as published only once both registries have it.
+    open_vsx: object = field(default=False, compare=False, hash=False)
 
     @property
     def slug(self):
@@ -209,7 +212,8 @@ def load(read):
         options = {key: entry[key] for key in GITHUB_OPTIONS if key in entry}
         packages.append(Package(entry["name"], entry["registry"], entry["manifest"], entry["version"],
                                 entry.get("tag", "{name}-v{version}"), tuple(entry.get("paths") or ()),
-                                tuple(artifacts), tuple(sorted(options.items()))))
+                                tuple(artifacts), tuple(sorted(options.items())),
+                                entry.get("open-vsx", False)))
     settings = data.get("release") or {}
     name_from = settings.get("name_from", packages[-1].name)
     if name_from not in {p.name for p in packages}:
@@ -262,6 +266,17 @@ def github_option_errors(package):
         if isinstance(tap, str) and not re.fullmatch(r"[\w.-]+/[\w.-]+", tap):
             errors.append(f"{package.name}: homebrew tap is owner/repository, e.g. org/homebrew-tap")
     return errors
+
+
+def open_vsx_errors(package):
+    """What is wrong with a package's `open-vsx` option, as messages."""
+    if package.open_vsx is False:
+        return []
+    if package.registry != "vscode":
+        return [f"{package.name}: open-vsx only applies to a vscode package"]
+    if not isinstance(package.open_vsx, bool):
+        return [f"{package.name}: open-vsx is true or false"]
+    return []
 
 
 def version_key(version):
@@ -381,6 +396,7 @@ def check(read):
     for package in release.packages:
         errors.extend(artifact_errors(package))
         errors.extend(github_option_errors(package))
+        errors.extend(open_vsx_errors(package))
     # Each package after the listed packages of its own registry it depends on.
     position = {(p.registry, p.name): i for i, p in enumerate(release.packages)}
     for package in release.packages:
@@ -456,13 +472,8 @@ def published_on(package):
     if package.registry == "npm":
         return http_status(f"https://registry.npmjs.org/{quote(name, safe='@')}/{quote(version)}")[0] == 200
     if package.registry == "vscode":
-        query = {"filters": [{"criteria": [{"filterType": 7, "value": name}]}], "flags": 0x1}
-        status, body = http_status(
-            "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery",
-            data=json.dumps(query).encode(),
-            headers={"Content-Type": "application/json", "Accept": "application/json;api-version=7.2-preview.1"})
-        results = json.loads(body or b"{}").get("results", [{}])[0].get("extensions", [])
-        return any(v.get("version") == version for e in results for v in e.get("versions", []))
+        # With `open-vsx: true`, Open VSX is part of the publication.
+        return on_marketplace(package) and (package.open_vsx is not True or on_open_vsx(package))
     if package.registry == "github":
         token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
         headers = {"Accept": "application/vnd.github+json", **({"Authorization": f"Bearer {token}"} if token else {})}
@@ -473,6 +484,24 @@ def published_on(package):
         release = json.loads(body) if status == 200 else {}
         return bool(release.get("assets")) and not release.get("draft")
     raise ValueError(f"unknown registry {package.registry!r}")
+
+
+def on_marketplace(package):
+    """Whether the Visual Studio Marketplace lists the extension's version."""
+    query = {"filters": [{"criteria": [{"filterType": 7, "value": package.name}]}], "flags": 0x1}
+    status, body = http_status(
+        "https://marketplace.visualstudio.com/_apis/public/gallery/extensionquery",
+        data=json.dumps(query).encode(),
+        headers={"Content-Type": "application/json", "Accept": "application/json;api-version=7.2-preview.1"})
+    results = json.loads(body or b"{}").get("results", [{}])[0].get("extensions", [])
+    return any(v.get("version") == package.version for e in results for v in e.get("versions", []))
+
+
+def on_open_vsx(package):
+    """Whether Open VSX serves the extension's version (<publisher>.<name>)."""
+    publisher, _, name = package.name.partition(".")
+    url = f"https://open-vsx.org/api/{quote(publisher)}/{quote(name)}/{quote(package.version)}"
+    return http_status(url)[0] == 200
 
 
 # ---------------------------------------------------------------------------
@@ -1236,7 +1265,8 @@ def gate_outputs(sha, release, chosen, verify_only, output=None):
         "sha": sha,
         "release": release.name,
         "selection": json.dumps([{"name": p.name, "registry": p.registry, "version": p.version,
-                                  "manifest": p.manifest, "tag": p.tag, "slug": p.slug} for p in chosen]),
+                                  "manifest": p.manifest, "tag": p.tag, "slug": p.slug,
+                                  **({"open-vsx": True} if p.open_vsx is True else {})} for p in chosen]),
         "verify-only": str(verify_only).lower(),
     }
     for registry in REGISTRIES:
@@ -1271,7 +1301,8 @@ def verify_selection(tag_name, release, sha, existing, status, output):
 def selected(registry, selection):
     """The packages of `registry` in a gate's selection (JSON), in order. The
     selection carries each package's rendered tag, which serves as its format."""
-    return [Package(s["name"], s["registry"], s["manifest"], s["version"], s.get("tag", "{name}-v{version}"))
+    return [Package(s["name"], s["registry"], s["manifest"], s["version"], s.get("tag", "{name}-v{version}"),
+                    open_vsx=s.get("open-vsx", False))
             for s in json.loads(selection) if s["registry"] == registry]
 
 
@@ -1280,16 +1311,23 @@ def crate_exists(name):
     return http_status(f"https://crates.io/api/v1/crates/{quote(name)}")[0] == 200
 
 
-def preflight(registry, selection, status=published_on, exists=crate_exists, output=None):
+def preflight(registry, selection, status=published_on, exists=crate_exists, output=None, ovsx_token=False):
     """Refuse, just before uploading, any selected version already published:
     another run may have published it since the gate. For crates.io, also
     say which selected crates are new (their first version needs a token,
     since Trusted Publishing needs the crate to exist): writes `new_crates`
-    (JSON), `new_crate` and `existing_crate` to GITHUB_OUTPUT."""
+    (JSON), `new_crate` and `existing_crate` to GITHUB_OUTPUT. For vscode,
+    writes `uploads`: which of the two registries each extension still lacks."""
     chosen = selected(registry, selection)
     if out := [str(p) for p in chosen if status(p)]:
         raise RuntimeError(f"already on {registry}: {', '.join(out)}; a published version is permanent")
     print(f"to publish on {registry}: " + (", ".join(str(p) for p in chosen) or "nothing"), flush=True)
+    if registry == "vscode":
+        uploads = vscode_uploads(chosen, ovsx_token)
+        target = output or os.environ.get("GITHUB_OUTPUT")
+        if target:
+            with open(target, "a", encoding="utf-8") as handle:
+                handle.write(f"uploads={json.dumps(uploads)}\n")
     if registry == "crates.io":
         new = [p.name for p in chosen if not exists(p.name)]
         outputs = {"new_crates": json.dumps(new), "new_crate": str(bool(new)).lower(),
@@ -1302,6 +1340,26 @@ def preflight(registry, selection, status=published_on, exists=crate_exists, out
         if new:
             print("first versions (published with the new-crate token): " + ", ".join(new), flush=True)
     return chosen
+
+
+def vscode_uploads(chosen, ovsx_token, marketplace=on_marketplace, open_vsx=on_open_vsx):
+    """[{name, version, marketplace, open-vsx}]: whether each extension is
+    still to be uploaded to each registry. A registry that already has the
+    version is skipped, so a re-run uploads only what is missing. An Open VSX
+    upload needs its token."""
+    uploads = []
+    for package in chosen:
+        upload = {"name": package.name, "version": package.version, "marketplace": not marketplace(package),
+                  "open-vsx": package.open_vsx is True and not open_vsx(package)}
+        for registry, label in (("marketplace", "the Marketplace"), ("open-vsx", "Open VSX")):
+            if not upload[registry] and (registry == "marketplace" or package.open_vsx is True):
+                print(f"{package}: already on {label}; not uploaded there again", flush=True)
+        uploads.append(upload)
+    missing = [u["name"] for u in uploads if u["open-vsx"]]
+    if missing and not ovsx_token:
+        raise RuntimeError(f"{', '.join(missing)}: {CONFIG} says open-vsx: true, but no Open VSX token was "
+                           "given (the ovsx-token input, from the OVSX_PAT secret)")
+    return uploads
 
 
 def publish_groups(chosen, new):
@@ -1851,7 +1909,8 @@ def main(argv=None):
             manifest = json.loads((root() / MANIFEST).read_text(encoding="utf-8"))
             print(f"release-kit {manifest['version']}: the installed copy is unmodified.")
         elif args.command == "preflight":
-            preflight(args.registry, args.selection)
+            # Only whether an Open VSX token is set; the token stays in the environment.
+            preflight(args.registry, args.selection, ovsx_token=bool(os.environ.get("OVSX_PAT")))
         elif args.command == "verify":
             verify(args.registry, args.selection, timeout=args.timeout)
         elif args.command == "consume":

@@ -54,6 +54,7 @@ from the manifests:
 | `attest` | no, `github` only | `true` attests the assets' build provenance. |
 | `homebrew` | no, `github` only | `{tap, formula, name}`: a Homebrew formula, proposed to a tap. See [Homebrew](registries/homebrew.md). |
 | `chocolatey` | no, `github` only | `{package, test}`: a Chocolatey package. See [Chocolatey](registries/chocolatey.md). |
+| `open-vsx` | no, `vscode` only | `true` publishes to Open VSX too, and the version counts as published only once both the Marketplace and Open VSX have it. Needs the `OVSX_PAT` secret. See [VS Code Marketplace and Open VSX](registries/vscode.md). |
 
 ### Manifests
 

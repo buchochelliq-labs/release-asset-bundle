@@ -9,7 +9,7 @@ five:
 | `crates.io` | [crates.io](crates-io.md) | from source | Trusted Publishing; a token for first versions | `crates-io` |
 | `pypi` | [PyPI](pypi.md) | built artifacts | Trusted Publishing | `pypi` |
 | `npm` | [npm](npm.md) | from source | Trusted Publishing, or a token | `npm` |
-| `vscode` | [VS Code Marketplace](vscode.md), and Open VSX | built artifacts | personal access tokens | `vscode-marketplace` |
+| `vscode` | [VS Code Marketplace](vscode.md), and Open VSX with `open-vsx: true` | built artifacts | personal access tokens | `vscode-marketplace` |
 
 Two more channels are made from a `github` package's release once it is out,
 set on that package rather than as a `registry`:
