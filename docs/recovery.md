@@ -141,3 +141,4 @@ A verify-only run never uploads, so it cannot finish a partial upload. Use
 | `release-X is on <sha>, not <sha>, and its run there may have published` | Release from that commit (`--commit`) or wait for its run. |
 | `... is not on origin/main as last fetched` | Run `git fetch`, and release only merged commits. |
 | `... every package of release X is already published` | (gate) Nothing to do. |
+| `<tag> is at <sha>, not <sha>, the commit the gate checked` | (build) A record tag moved after the gate checked it, and nothing was built. Find out who moved it and why; put it back on the gated commit to run again, or tag a new release. |

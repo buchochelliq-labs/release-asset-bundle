@@ -164,17 +164,50 @@ in `release.yml` that the publish jobs `need`.
 not edit it. It is a reusable workflow with two inputs, `sha` and `selection`,
 and `contents: read`. It holds no credentials.
 
-1. **`plan`** checks out `sha` and runs the [`plan`](commands.md#plan) action:
-   outputs `jobs` and `count`.
+1. **`plan`** checks out the first selected package's record tag, checks it
+   (below), and runs the [`plan`](commands.md#plan) action: outputs `jobs`
+   and `count`.
 2. **`build`** runs only when `count` is not `0`. It is a matrix over `jobs`
    (`fail-fast: false`), named `build <id>`, on each job's `os`. Each job
-   checks out `sha`, runs the [`build`](commands.md#build) action, and
-   uploads `dist/*` as the artifact `release--<slug>--<id>`
-   (`if-no-files-found: error`).
+   checks out its package's record tag, checks it, runs the
+   [`build`](commands.md#build) action, and uploads `dist/*` as the artifact
+   `release--<slug>--<id>` (`if-no-files-found: error`).
+
+The record tags are the ones the gate found on `sha`. Each job checks out
+`refs/tags/<record tag>` and, before anything from the checkout runs, stops
+unless the tag still names `sha`: what is built is exactly the commit the
+gate checked (on the default branch, recorded by its tags), and a tag moved
+or re-pushed during the run builds nothing.
 
 The build action sets up what the kind needs: Python 3.12 always; stable Rust
 with the target for `rust-binary`; Node 24 for `vsix`; `PyO3/maturin-action`
 for `maturin` (wheels, `--release`, `manylinux: auto`) and for the sdist.
+
+### No caches
+
+Nothing in a release run restores or saves an Actions cache: no
+`actions/cache`, no `cache:` on a setup action, `package-manager-cache: false`
+on every `actions/setup-node` (it caches npm by itself when `package.json`
+names npm as its `packageManager`), and `sccache: "false"` on
+`PyO3/maturin-action`. A run dispatched from `main` shares the default
+branch's cache scope, which every branch's workflows can restore from; a
+release run has nothing to gain from a cache and must not add to that one.
+Keep it so in jobs you add to `release.yml`.
+
+GitHub's CodeQL (`actions`, query `actions/cache-poisoning/poisonable-step`)
+reports a job that checks out a commit named by an input such as `sha`, in a
+workflow `workflow_dispatch` can start, and then runs code from it. Its
+model takes any checkout `ref` ending in `sha`, `head` or `commit` for an
+unvalidated pull request head, and it accepts no check for
+`workflow_dispatch`. The gate is that check here: the commit must be on the
+default branch and carry the release's annotated tags. The build workflow
+checks out the gate's record tags and verifies them against `sha` (above),
+and CodeQL reports nothing in the installed copy. A `release.yml` job of your own that checks out
+`needs.gate.outputs.sha` and runs code is reported the same way unless the
+job writes (the publish jobs do); if you add one, check out a record tag
+and verify it as the build workflow does, or dismiss the alert as a false
+positive: "the commit is the release gate's output, verified to be on the
+default branch; the job writes no cache".
 
 ### Artifact naming
 
