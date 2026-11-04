@@ -40,7 +40,8 @@ jobs get more:
 
 | Job | Permissions | Environment |
 |---|---|---|
-| `gate`, `ci`, `build` | `contents: read` | none |
+| `gate`, `ci` | `contents: read` | none |
+| `build` | `contents: read`, `actions: read` (only a [`ci-artifact`](configuration.md#ci-artifact) job uses its token) | none |
 | `publish-github` | `contents: write` | none |
 | `publish-crates` | `contents: read`, `id-token: write` | `crates-io` |
 | `publish-pypi` | `contents: read`, `id-token: write` | `pypi` |
