@@ -30,7 +30,7 @@ on npm yet, or if you do not use Trusted Publishing, pass an npm automation
 token to the action:
 
 ```yaml
-      - uses: ./.github/release-kit/publish-npm
+      - uses: ./.github/rab/publish-npm
         with:
           selection: ${{ needs.gate.outputs.selection }}
           token: ${{ secrets.NPM_TOKEN }}

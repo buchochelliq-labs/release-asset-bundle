@@ -20,7 +20,7 @@ jobs:
           python-version: "3.11"   # the oldest Python release.py supports
       - name: Unit tests
         run: |
-          python3 -m pip install --quiet pyyaml
+          python3 -m pip install --quiet pyyaml jsonschema   # jsonschema: the release record against its published schema
           git config --global user.name ci
           git config --global user.email ci@example.invalid
           python3 -m unittest discover -s tests -v
@@ -34,7 +34,7 @@ jobs:
           printf 'on:\n  workflow_call:\n    inputs:\n      ref: {type: string}\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: "true"\n' \
             > "$consumer/.github/workflows/ci.yml"
           python3 scripts/release.py install --into "$consumer"
-          (cd "$consumer" && python3 .github/release-kit/scripts/release.py vendored && actionlint)
+          (cd "$consumer" && python3 .github/rab/scripts/release.py vendored && actionlint)
           actionlint .github/workflows/*.yml
           python3 tests/extract_scripts.py lint-scripts
           shellcheck -S warning lint-scripts/*.sh

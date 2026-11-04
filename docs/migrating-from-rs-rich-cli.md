@@ -1,16 +1,16 @@
 # Migrating from rs-rich-cli's scripts
 
-release-kit was generalised from rs-rich-cli's release process
-(`RELEASES.toml`, `scripts/release_cohort.py`, `release.yml` and
+rab (then called release-kit) was generalised from rs-rich-cli's release
+process (`RELEASES.toml`, `scripts/release_cohort.py`, `release.yml` and
 `pypi-release.yml`). The rules are the same. This page maps one onto the other,
 using rs-rich-cli itself as the example.
 
 ## What changes
 
-| rs-rich-cli | release-kit |
+| rs-rich-cli | rab |
 |---|---|
-| `RELEASES.toml` (TOML, `[[package]]`) | `release-kit.yml` (YAML, `packages:`) |
-| `scripts/release_cohort.py` | `.github/release-kit/scripts/release.py` (installed copy) |
+| `RELEASES.toml` (TOML, `[[package]]`) | `rab.yml` (YAML, `packages:`) |
+| `scripts/release_cohort.py` | `.github/rab/scripts/release.py` (installed copy) |
 | tags derived in code: `<name>-v<version>`, and `python-v<version>` for PyPI | `tag:` per package; default `{name}-v{version}` |
 | release named by the last crates.io package | `release: name_from:` (default: the last package listed) |
 | crates.io in `release.yml`, PyPI in `pypi-release.yml` from its own `python-v…` tag | every registry in one `release.yml` run, started by the release tag |
@@ -18,13 +18,13 @@ using rs-rich-cli itself as the example.
 | build jobs written by hand | `artifacts:` declared per package |
 | `tag --registry` | gone: one run publishes every registry |
 
-## 1. `RELEASES.toml` → `release-kit.yml`
+## 1. `RELEASES.toml` → `rab.yml`
 
 Each `[[package]]` becomes a list entry with the same four fields. Keep the
 order. Versions must be quoted.
 
 ```yaml
-# release-kit.yml for rs-rich-cli
+# rab.yml for rs-rich-cli
 release:
   name_from: rs-rich-cli    # required: the last package listed is the PyPI rs-rich
 
@@ -66,13 +66,13 @@ packages:
 Three details matter:
 
 - **`name_from: rs-rich-cli`.** rs-rich-cli names a release by its last
-  crate. release-kit's default is the last package listed, which here is the
+  crate. rab's default is the last package listed, which here is the
   PyPI package. Name it explicitly. (`name_from` matches by name; if two
   packages share it, the first listed wins.)
 - **`tag: "python-v{version}"` on the PyPI `rs-rich`.** The crate and the
   Python package are both called `rs-rich`. Under the default format both
   would be tagged `rs-rich-v<version>`, and the crate already has tags such as
-  `rs-rich-v0.0.10`. release-kit would refuse the Python package's tag as
+  `rs-rich-v0.0.10`. rab would refuse the Python package's tag as
   [not its own record](configuration.md#record-tags-and-collisions).
   `python-v{version}` is also the format rs-rich-cli already uses, so existing
   `python-v…` tags keep their meaning.
@@ -113,7 +113,7 @@ rs-rich-cli's `ci.yml` takes its commit as `checkout_ref`, not `ref`. In
 
 ## 4. Keep repository-specific checks as your own jobs
 
-release-kit does not carry these over. Add them to `release.yml` yourself:
+rab does not carry these over. Add them to `release.yml` yourself:
 
 - **API compatibility** (`cargo-semver-checks`): a job after `gate` that
   checks out `needs.gate.outputs.sha`; make `publish-crates` need it.
@@ -127,17 +127,17 @@ Pin every action you add to a commit SHA, as the rest of the workflow is.
 
 ## 5. Switch over
 
-1. Finish any release in flight with the old scripts first. release-kit does
-   not resume a release whose commit has no `release-kit.yml`, and it refuses
+1. Finish any release in flight with the old scripts first. rab does
+   not resume a release whose commit has no `rab.yml`, and it refuses
    an existing tag of an unpublished package unless the tag's message starts
    with `<name> <version> (<registry>)`. `release_cohort.py` wrote
    `<name> <version>`.
-2. Install the copy, add `release-kit.yml`, update `release.yml` (or move its
+2. Install the copy, add `rab.yml`, update `release.yml` (or move its
    extra jobs into the template), delete `pypi-release.yml` and
    `RELEASES.toml`, and add `release.py check` and `release.py vendored` to CI.
 3. Update the PyPI trusted publisher.
 4. Merge, then cut the next release with
-   `python3 .github/release-kit/scripts/release.py tag`.
+   `python3 .github/rab/scripts/release.py tag`.
 
 Already published versions are untouched: they stay published, and their old
 tags are never selected again.

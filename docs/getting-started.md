@@ -11,37 +11,42 @@ machine. `release.py tag` also uses the [GitHub CLI](https://cli.github.com/)
 
 ## 1. Install the copy
 
-release-kit is a public repository. Clone it next to your repository, then run
-`install` from your repository's root:
+rab, the Release Asset Bundle, is a public repository. Clone it next to your
+repository, then run `install` from your repository's root:
 
 ```sh
-git clone https://github.com/buchochelliq-labs/release-kit ../release-kit
+git clone https://github.com/buchochelliq-labs/release-asset-bundle ../release-asset-bundle
 cd your-repository
-python3 ../release-kit/scripts/release.py install
+python3 ../release-asset-bundle/scripts/release.py install
 ```
 
 `install` writes:
 
 | Path | What it is |
 |---|---|
-| `.github/release-kit/scripts/release.py` | the driver script |
-| `.github/release-kit/<action>/action.yml` | the composite actions: `build`, `gate`, `plan`, `publish-crates`, `publish-github`, `publish-npm`, `publish-pypi`, `publish-vscode` |
-| `.github/release-kit/README.md` | a notice: do not edit, reinstall instead |
-| `.github/release-kit/manifest.json` | the kit's version and commit, and a SHA-256 checksum of every installed file |
-| `.github/workflows/release-kit-build.yml` | the reusable build workflow |
+| `.github/rab/scripts/release.py` | the driver script |
+| `.github/rab/<action>/action.yml` | the composite actions: `build`, `gate`, `plan`, `publish-crates`, `publish-github`, `publish-npm`, `publish-pypi`, `publish-vscode` |
+| `.github/rab/README.md` | a notice: do not edit, reinstall instead |
+| `.github/rab/manifest.json` | the kit's version and commit, and a SHA-256 checksum of every installed file |
+| `.github/workflows/rab-build.yml` | the reusable build workflow |
 | `.github/workflows/release.yml` | the starter release workflow, **only if the repository has none** |
 
-Why a copy, and not `uses: buchochelliq-labs/release-kit/gate@v1`? A copy is
-pinned and reviewable. Your repository runs exactly the code in its own
+Why a copy, and not `uses: buchochelliq-labs/release-asset-bundle/gate@v2`? A
+copy is pinned and reviewable. Your repository runs exactly the code in its own
 history, a reviewer sees every line of it, and it changes only when someone
 installs again and opens a PR. `install --into DIR` installs into another
 directory instead of the repository you are in.
 
-To update later: `git -C ../release-kit pull`, run `install` again, and open a
-PR. That replaces `.github/release-kit/` (files the new version dropped are
-removed) and the build workflow, and leaves your `release.yml` alone.
+To update later: `git -C ../release-asset-bundle pull`, run `install` again,
+and open a PR. That replaces `.github/rab/` (files the new version dropped
+are removed) and the build workflow, and leaves your `release.yml` alone.
 
-## 2. Write `release-kit.yml`
+!!! note "Coming from release-kit 1.x?"
+    `install` migrates the old layout (`release-kit.yml`,
+    `.github/release-kit/`, `release-kit-build.yml`) to the new names. See
+    [Migrating from release-kit 1.x](migrating-to-rab.md).
+
+## 2. Write `rab.yml`
 
 At the repository root. List every package, in publication order: each after
 the listed packages of the same registry it depends on.
@@ -76,15 +81,15 @@ packages:
 Then check it:
 
 ```sh
-python3 .github/release-kit/scripts/release.py check
+python3 .github/rab/scripts/release.py check
 ```
 
 ```text
-release-kit.yml matches the repository (release 0.1.0).
+rab.yml matches the repository (release 0.1.0).
 ```
 
-Quote every version. YAML reads `0.10` as the number `0.1`, so release-kit
-refuses an unquoted version. See the [`release-kit.yml` reference](configuration.md)
+Quote every version. YAML reads `0.10` as the number `0.1`, so rab
+refuses an unquoted version. See the [`rab.yml` reference](configuration.md)
 for every field.
 
 ## 3. Wire `release.yml`
@@ -148,19 +153,20 @@ Add these steps to a job in `ci.yml`:
 
 ```yaml
       - run: python3 -m pip install --quiet pyyaml
-      - run: python3 .github/release-kit/scripts/release.py check
-      - run: python3 .github/release-kit/scripts/release.py vendored
+      - run: python3 .github/rab/scripts/release.py check
+      - run: python3 .github/rab/scripts/release.py vendored
 ```
 
-`check` fails when `release-kit.yml` disagrees with a manifest. `vendored`
+`check` fails when `rab.yml` disagrees with a manifest, or when
+crates.io would refuse a crate ([Publishing to crates.io](registries/publishing-to-crates-io.md)). `vendored`
 fails when anyone edits, deletes or adds a file in the installed copy, so the
 copy changes only by installing again.
 
 !!! note "Dependabot"
     If your repository's Dependabot updates GitHub Actions, it may open PRs
-    that change `.github/workflows/release-kit-build.yml`. That file is part of
+    that change `.github/workflows/rab-build.yml`. That file is part of
     the installed copy, so `vendored` fails on them. Close those PRs and
-    reinstall a newer release-kit instead; release-kit's own Dependabot keeps
+    reinstall a newer rab instead; rab's own Dependabot keeps
     its pins current.
 
 ## 5. Set up each registry once
@@ -171,25 +177,25 @@ copy changes only by installing again.
 | [crates.io](registries/crates-io.md) | Trusted Publishing; a crate's first version uses a token | a `crates-io` environment; a `CARGO_REGISTRY_TOKEN` secret in it for new crates; a Trusted Publisher on each crate |
 | [PyPI](registries/pypi.md) | Trusted Publishing | a `pypi` environment; a (pending) trusted publisher on PyPI |
 | [npm](registries/npm.md) | Trusted Publishing (npm 11.5+), or a token | an `npm` environment; a trusted publisher on npmjs.com |
-| [VS Code Marketplace](registries/vscode.md) | `VSCE_PAT` (and `OVSX_PAT` for Open VSX) | both secrets in a `vscode-marketplace` environment |
+| [VS Code Marketplace](registries/vscode.md) | `VSCE_PAT` (and `OVSX_PAT` for a package with `open-vsx: true`) | both secrets in a `vscode-marketplace` environment |
 
 Trusted publishers name the workflow file `release.yml` and the environment.
 Keep both names, or change the publisher settings to match.
 
 ## 6. Commit, merge, release
 
-Commit the copy, `release-kit.yml`, `release.yml` and the CI changes in a PR,
+Commit the copy, `rab.yml`, `release.yml` and the CI changes in a PR,
 and merge it. Then, on the default branch:
 
 ```sh
 git switch main && git pull
-python3 .github/release-kit/scripts/release.py status
-python3 .github/release-kit/scripts/release.py tag --dry-run
-python3 .github/release-kit/scripts/release.py tag
+python3 .github/rab/scripts/release.py status
+python3 .github/rab/scripts/release.py tag --dry-run
+python3 .github/rab/scripts/release.py tag
 ```
 
 `tag` pushes the tags, then waits until the run has published everything
 (up to three hours by default). See [Commands](commands.md#tag).
 
 For each later release: bump the versions in the manifests, run `sync` to copy
-them into `release-kit.yml`, merge the PR, and run `tag` again.
+them into `rab.yml`, merge the PR, and run `tag` again.

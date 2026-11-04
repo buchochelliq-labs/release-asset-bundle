@@ -1,9 +1,13 @@
-# `release-kit.yml` reference
+# `rab.yml` reference
 
-`release-kit.yml` sits at the repository root. It has an optional `release:`
+`rab.yml` sits at the repository root. It has an optional `release:`
 mapping and a required `packages:` list. `release.py check` validates all of
 it against the repository's manifests; the gate runs the same check on the
 tagged commit and refuses a release that fails it.
+
+Its release-kit 1.x name, `release-kit.yml`, is still read until rab 3.0.0,
+with a warning, when there is no `rab.yml`; both together are refused.
+`install` renames it (see [Migrating from release-kit 1.x](migrating-to-rab.md)).
 
 ```yaml
 release:                    # optional
@@ -54,6 +58,7 @@ from the manifests:
 | `attest` | no, `github` only | `true` attests the assets' build provenance. |
 | `homebrew` | no, `github` only | `{tap, formula, name}`: a Homebrew formula, proposed to a tap. See [Homebrew](registries/homebrew.md). |
 | `chocolatey` | no, `github` only | `{package, test}`: a Chocolatey package. See [Chocolatey](registries/chocolatey.md). |
+| `open-vsx` | no, `vscode` only | `true` publishes to Open VSX too, and the version counts as published only once both the Marketplace and Open VSX have it. Needs the `OVSX_PAT` secret. See [VS Code Marketplace and Open VSX](registries/vscode.md). |
 
 ### Manifests
 
@@ -73,7 +78,7 @@ PyPI versions follow PEP 440 (`1.2.0`, `1.2.0rc1`, `1.2.0.post1`,
 `1.2.0.dev3`). Every other registry's follow SemVer (`1.2.0`, `1.2.0-rc.1`).
 A version with a `-` makes a GitHub release a pre-release.
 
-Quote versions. YAML reads `version: 0.10` as the number `0.1`, so release-kit
+Quote versions. YAML reads `version: 0.10` as the number `0.1`, so rab
 refuses any version that is not a string:
 
 ```text
@@ -107,11 +112,11 @@ from the release tag; `check` refuses duplicates.
 `check` compares the tags of the versions in the file now. A collision can
 also come from history. Suppose crates.io has the crate `rs-rich` and PyPI has
 the Python package `rs-rich`, both tagged with the default `{name}-v{version}`.
-When the crate was at 0.0.10, release-kit pushed the tag `rs-rich-v0.0.10`.
+When the crate was at 0.0.10, the kit pushed the tag `rs-rich-v0.0.10`.
 When the Python package reaches 0.0.10, its tag would be `rs-rich-v0.0.10`
 too, already on another commit.
 
-release-kit catches this. A package tag that already exists on the remote, at
+rab catches this. A package tag that already exists on the remote, at
 a commit other than the one being released, must be that package's own
 record: an annotated tag whose message starts with
 `<name> <version> (<registry>)`, which is what `release.py tag` writes. If it
@@ -120,7 +125,7 @@ is not, `tag` and the gate refuse:
 ```text
 these tags already exist for something else:
   rs-rich-v0.0.10 at 4f2a9c1d7e3b: not rs-rich 0.0.10 (pypi)'s record
-Give the package a tag format of its own in release-kit.yml (for example
+Give the package a tag format of its own in rab.yml (for example
 `tag: "python-v{version}"` for a PyPI package named like a crate), or bump its version.
 ```
 
@@ -137,12 +142,13 @@ The fix is a tag format of its own:
 The check covers packages that are not yet published. A lightweight tag, or
 one made by other tooling with a different first line, is also "not its own".
 
-A tag that points at a commit with no `release-kit.yml` (made before the
-repository adopted release-kit) is refused with an explanation:
+A tag that points at a commit with no `rab.yml` (nor release-kit 1.x's
+`release-kit.yml`), made before the repository adopted the kit, is refused
+with an explanation:
 
 ```text
-rs-rich-v0.0.9 is on 1a2b3c4d5e6f, which has no release-kit.yml: the tag predates
-release-kit. Bump the package's version, or delete the stale tag if nothing was
+rs-rich-v0.0.9 is on 1a2b3c4d5e6f, which has no rab.yml (nor release-kit.yml):
+the tag predates the kit. Bump the package's version, or delete the stale tag if nothing was
 published from it.
 ```
 
@@ -263,7 +269,7 @@ anything is published, unless:
 - the archive's SHA-256 is `sha256`, and GitHub records the same digest;
 - the artifact has not expired;
 - the tagged commit **is the commit that built it, or descends from it and
-  changes nothing but `release-kit.yml`**. This is rule 4. The artifact must
+  changes nothing but `rab.yml`**. This is rule 4. The artifact must
   exist before its id can be pinned, so the pin can never be in the commit that
   built it: the commit that records the pin is allowed, any other change is
   not. A CI run on a release-candidate branch qualifies once that branch is
@@ -275,7 +281,7 @@ anything is published, unless:
   least one member must match.
 
 The usual order is: the CI run builds the artifact on the release branch; a
-commit then pins its `artifact` and `sha256` in `release-kit.yml`; that commit
+commit then pins its `artifact` and `sha256` in `rab.yml`; that commit
 (or `main` after the release branch merges) is tagged.
 
 The matching members are copied into `dist` under their own names, and the
@@ -420,7 +426,13 @@ A `github` package can shape its release:
 - a package listed before a package of the same registry it depends on;
 - artifacts on crates.io or npm packages, no artifacts on the others, an
   unknown kind, a kind its registry cannot publish, a missing or unknown
-  field, a malformed `test`, or a target with no runner.
+  field, a malformed `test`, or a target with no runner;
+- for a crates.io package, anything that would stop `cargo publish`:
+  `publish = false`, a `git` or `path` dependency without a version, a
+  dependency not on crates.io, a name someone else owns, or a file the
+  package does not carry. See
+  [Publishing to crates.io](registries/publishing-to-crates-io.md). This part
+  runs only in `check` (and `preflight`), not in `tag` or the gate.
 
 Before any of that, the file must load. These stop `check` at once: an empty `packages:`, a package missing `name`,
 `registry`, `manifest` or `version`, an unquoted version, `artifacts` that are

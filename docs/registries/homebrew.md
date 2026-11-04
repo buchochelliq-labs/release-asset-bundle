@@ -82,5 +82,16 @@ and not in a verify-only run. For each selected `github` package with
    (`release.py homebrew-tap`). A tap that already has the formula is left
    alone; running again replaces the branch and reuses the open pull request.
 
-A failed job is re-run on its own (**Re-run failed jobs**): `release.py tag`
-does not select a package whose GitHub release is already published.
+## Finishing it later
+
+The tap is `idempotent`: rendering and proposing the formula again is
+harmless. The channel is done when the tap's default branch has
+`Formula/<name>.rb` mentioning the version, or a pull request from
+`<name>-<version>` is open on the tap; a prerelease is never due. If the job
+failed, or ran without a tap token, fix the cause and run `release.py tag`:
+it pushes the release tag again with only `homebrew` due for the package, and
+`publish-homebrew` runs while `publish-github` is skipped. The state is read
+through GitHub's API with `GH_TOKEN` (the gate passes the job's token, which
+reads public repositories): a private tap reads as `due` unless the token can
+read it. See
+[the retry policy](../recovery.md#what-each-channel-allows-again-the-retry-policy).

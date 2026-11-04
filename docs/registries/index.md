@@ -1,6 +1,6 @@
 # Registries
 
-A package's `registry` field says where it is published. release-kit supports
+A package's `registry` field says where it is published. rab supports
 five:
 
 | `registry` | Where | Publishes | Credential | Environment |
@@ -9,7 +9,7 @@ five:
 | `crates.io` | [crates.io](crates-io.md) | from source | Trusted Publishing; a token for first versions | `crates-io` |
 | `pypi` | [PyPI](pypi.md) | built artifacts | Trusted Publishing | `pypi` |
 | `npm` | [npm](npm.md) | from source | Trusted Publishing, or a token | `npm` |
-| `vscode` | [VS Code Marketplace](vscode.md), and Open VSX | built artifacts | personal access tokens | `vscode-marketplace` |
+| `vscode` | [VS Code Marketplace](vscode.md), and Open VSX with `open-vsx: true` | built artifacts | personal access tokens | `vscode-marketplace` |
 
 Two more channels are made from a `github` package's release once it is out,
 set on that package rather than as a `registry`:
@@ -19,11 +19,14 @@ set on that package rather than as a `registry`:
 | `homebrew` | [a Homebrew tap](homebrew.md) | a formula, as a pull request on the tap | a token for the tap | `homebrew` |
 | `chocolatey` | [Chocolatey](chocolatey.md) | a package that installs the release's archive | an API key | `chocolatey` |
 
+Unlike a registry's version, these two can be published again until they are
+done: see [the retry policy](../recovery.md#what-each-channel-allows-again-the-retry-policy).
+
 Every publish action follows the same steps:
 
 1. **preflight**: refuse any selected version already on the registry
    (rule 1), in case another run published it since the gate;
-2. **upload**, in `release-kit.yml` order;
+2. **upload**, in `rab.yml` order;
 3. **verify**: wait until the registry serves every selected version;
 4. **consume**, for crates.io and PyPI: use each version as a stranger
    would. (npm's action currently consumes only in verify-only runs; see

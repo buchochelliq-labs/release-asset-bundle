@@ -1,10 +1,10 @@
-# The buchochelliq-labs release workflow (release-kit), installed by
+# The buchochelliq-labs release workflow (rab, the Release Asset Bundle), installed by
 # `release.py install` when the repository had none. It is the repository's
-# own file: keep the publish jobs for the registries in release-kit.yml (what
+# own file: keep the publish jobs for the registries in rab.yml (what
 # gets built comes from its `artifacts`), and edit it as needed. Everything
-# under .github/release-kit/ is the installed kit and is not edited.
+# under .github/rab/ is the installed kit and is not edited.
 #
-# `python3 .github/release-kit/scripts/release.py tag` on the default branch
+# `python3 .github/rab/scripts/release.py tag` on the default branch
 # pushes the tags; the release tag starts this run, which checks it once, runs
 # CI once on the tagged commit, builds, publishes what is not yet published,
 # and then uses each package as a stranger would.
@@ -57,7 +57,7 @@ jobs:
           ref: refs/tags/${{ inputs.tag || github.ref_name }}
           persist-credentials: false
       - id: gate
-        uses: ./.github/release-kit/gate
+        uses: ./.github/rab/gate
         with:
           tag: ${{ inputs.tag || github.ref_name }}
           verify-only: ${{ inputs.verify_only == true }}
@@ -71,7 +71,7 @@ jobs:
     with:
       ref: ${{ needs.gate.outputs.sha }}
 
-  # Builds what release-kit.yml's `artifacts` declare, for the packages due,
+  # Builds what rab.yml's `artifacts` declare, for the packages due,
   # from the tagged commit: one job per artifact and target, each running the
   # artifact's `test` (if any) on what it built. Skipped in a verify-only run.
   build:
@@ -80,7 +80,7 @@ jobs:
     permissions:
       contents: read
       actions: read   # a ci-artifact reads this repository's CI artifacts
-    uses: ./.github/workflows/release-kit-build.yml
+    uses: ./.github/workflows/rab-build.yml
     with:
       sha: ${{ needs.gate.outputs.sha }}
       selection: ${{ needs.gate.outputs.selection }}
@@ -112,7 +112,7 @@ jobs:
         with:
           pattern: release--*
           path: dist
-      - uses: ./.github/release-kit/publish-github
+      - uses: ./.github/rab/publish-github
         with:
           selection: ${{ needs.gate.outputs.selection }}
           verify-only: ${{ needs.gate.outputs.verify-only }}
@@ -120,11 +120,15 @@ jobs:
   # From the GitHub release, once it is out: a github package's `homebrew`
   # formula, attached to the release and proposed to the tap with the
   # environment's HOMEBREW_TAP_TOKEN (without it, only a notice).
+  # It also runs alone, when the gate selected a published release only to
+  # finish its formula (publish-github is then skipped: nothing to upload).
   publish-homebrew:
-    needs: [gate, publish-github]
+    needs: [gate, ci, build, publish-github]
     if: >-
-      !cancelled() && needs.gate.outputs.homebrew == 'true' && needs.publish-github.result == 'success'
-      && needs.gate.outputs.verify-only != 'true'
+      !cancelled() && needs.gate.outputs.homebrew == 'true' && needs.gate.outputs.verify-only != 'true'
+      && (needs.publish-github.result == 'success'
+          || (needs.publish-github.result == 'skipped' && needs.gate.outputs.github != 'true'
+              && needs.ci.result == 'success' && needs.build.result == 'success'))
     runs-on: ubuntu-latest
     environment: homebrew
     permissions:
@@ -140,18 +144,21 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 -m pip install --quiet pyyaml
-      - uses: ./.github/release-kit/publish-homebrew
+      - uses: ./.github/rab/publish-homebrew
         with:
           selection: ${{ needs.gate.outputs.selection }}
           tap-token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
 
   # A github package's `chocolatey` package, installed from the release on
   # Windows and pushed with the environment's CHOCOLATEY_API_KEY.
+  # Like publish-homebrew, it also runs alone to finish a published release.
   publish-chocolatey:
-    needs: [gate, publish-github]
+    needs: [gate, ci, build, publish-github]
     if: >-
-      !cancelled() && needs.gate.outputs.chocolatey == 'true' && needs.publish-github.result == 'success'
-      && needs.gate.outputs.verify-only != 'true'
+      !cancelled() && needs.gate.outputs.chocolatey == 'true' && needs.gate.outputs.verify-only != 'true'
+      && (needs.publish-github.result == 'success'
+          || (needs.publish-github.result == 'skipped' && needs.gate.outputs.github != 'true'
+              && needs.ci.result == 'success' && needs.build.result == 'success'))
     runs-on: windows-latest
     environment: chocolatey
     steps:
@@ -163,7 +170,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --quiet pyyaml
-      - uses: ./.github/release-kit/publish-chocolatey
+      - uses: ./.github/rab/publish-chocolatey
         with:
           selection: ${{ needs.gate.outputs.selection }}
           api-key: ${{ secrets.CHOCOLATEY_API_KEY }}
@@ -204,11 +211,11 @@ jobs:
         if: needs.gate.outputs.verify-only != 'true'
         env:
           SELECTION: ${{ needs.gate.outputs.selection }}
-        run: python3 .github/release-kit/scripts/release.py preflight --registry crates.io --selection "$SELECTION"
+        run: python3 .github/rab/scripts/release.py preflight --registry crates.io --selection "$SELECTION"
       - id: auth
         if: steps.preflight.outputs.existing_crate == 'true'
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
-      - uses: ./.github/release-kit/publish-crates
+      - uses: ./.github/rab/publish-crates
         with:
           selection: ${{ needs.gate.outputs.selection }}
           new-crates: ${{ steps.preflight.outputs.new_crates || '[]' }}
@@ -241,7 +248,7 @@ jobs:
         with:
           pattern: release--*
           path: dist
-      - uses: ./.github/release-kit/publish-pypi
+      - uses: ./.github/rab/publish-pypi
         with:
           selection: ${{ needs.gate.outputs.selection }}
           verify-only: ${{ needs.gate.outputs.verify-only }}
@@ -266,13 +273,14 @@ jobs:
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false   # release jobs write no caches
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
       - run: python3 -m pip install --quiet pyyaml
       - if: needs.gate.outputs.verify-only != 'true'
         run: npm ci
-      - uses: ./.github/release-kit/publish-npm
+      - uses: ./.github/rab/publish-npm
         with:
           selection: ${{ needs.gate.outputs.selection }}
           verify-only: ${{ needs.gate.outputs.verify-only }}
@@ -293,6 +301,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
+          package-manager-cache: false   # release jobs write no caches
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
@@ -302,9 +311,66 @@ jobs:
         with:
           pattern: release--*
           path: dist
-      - uses: ./.github/release-kit/publish-vscode
+      - uses: ./.github/rab/publish-vscode
         with:
           selection: ${{ needs.gate.outputs.selection }}
           vsce-token: ${{ secrets.VSCE_PAT }}
           ovsx-token: ${{ secrets.OVSX_PAT }}
           verify-only: ${{ needs.gate.outputs.verify-only }}
+
+  # The run's release record, release-record.json, uploaded as the artifact
+  # `release-record`: the release, its commit, and each package's outcome,
+  # files and registry URL, for a coordinator (`gh run download <run> -n
+  # release-record`). It runs whatever happened before it, so a run that
+  # failed halfway still says what it published. Keep every publish job in
+  # its `needs`.
+  record:
+    needs: [gate, ci, build, publish-github, publish-homebrew, publish-chocolatey, publish-crates,
+            publish-pypi, publish-npm, publish-vscode]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      # As in the build workflow: the release tag must still name the commit
+      # the gate checked before anything from the checkout runs. (When the
+      # gate failed there is no such commit; the record then says so.)
+      - name: Check the tag still names the gated commit
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          at=$(git rev-parse HEAD)
+          if [ -n "$SHA" ] && [ "$at" != "$SHA" ]; then
+            echo "::error::$TAG is at $at, not $SHA, the commit the gate checked; no record is written"
+            exit 1
+          fi
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet pyyaml
+      # The files each package was built into, for their SHA-256.
+      - if: needs.build.result != 'skipped'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release--*
+          path: dist
+      - env:
+          # Reads a private repository's GitHub releases (contents: read).
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          SELECTION: ${{ needs.gate.outputs.selection }}
+          VERIFY_ONLY: ${{ needs.gate.outputs.verify-only }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: >-
+          python3 .github/rab/scripts/release.py record --tag "$TAG" --sha "$SHA"
+          --selection "$SELECTION" --verify-only "$VERIFY_ONLY" --needs "$NEEDS" --out release-record.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-record
+          path: release-record.json
+          if-no-files-found: error

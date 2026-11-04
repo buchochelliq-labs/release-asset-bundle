@@ -1,0 +1,10 @@
+{
+  "crates": {
+    "onto-core": {
+      "repository": "https://github.com/acme/ontology",
+      "owners": [
+        "a-member"
+      ]
+    }
+  }
+}

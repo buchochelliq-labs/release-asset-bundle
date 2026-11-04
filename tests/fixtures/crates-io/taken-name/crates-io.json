@@ -1,0 +1,10 @@
+{
+  "crates": {
+    "onto": {
+      "repository": "https://github.com/someone/onto",
+      "owners": [
+        "someone"
+      ]
+    }
+  }
+}

@@ -1,0 +1,10 @@
+# A fixture for release.py check's crates.io readiness (tests/test_release.py).
+packages:
+  - name: onto-core
+    registry: crates.io
+    manifest: crates/onto-core/Cargo.toml
+    version: "0.1.0"
+  - name: onto-cli
+    registry: crates.io
+    manifest: crates/onto-cli/Cargo.toml
+    version: "0.1.0"

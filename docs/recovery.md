@@ -3,13 +3,18 @@
 The rule is: **re-run, don't repair.** Fix the cause, then run
 `release.py tag` again. Do not delete or move tags by hand, and do not use
 GitHub's "Re-run jobs" button on a publish job: `tag` works out what happened
-and what is still due.
+and what is still due, including the Homebrew and Chocolatey channels made
+from a published GitHub release ([retry policy](#what-each-channel-allows-again-the-retry-policy)).
 
 ```sh
 git switch main && git pull
-python3 .github/release-kit/scripts/release.py tag --dry-run   # see what it would do
-python3 .github/release-kit/scripts/release.py tag
+python3 .github/rab/scripts/release.py tag --dry-run   # see what it would do
+python3 .github/rab/scripts/release.py tag
 ```
+
+Every run's [release record](release-record.md) says what it published:
+`gh run download <run> -n release-record`, then look at each package's
+`outcome`.
 
 ## What `tag` can prove: `dead()`
 
@@ -83,9 +88,9 @@ that are still due, merge, and release the new versions.
   least one asset. If an upload stopped partway, a re-run does not upload the
   rest. Check the release's files against the build artifacts, and upload any
   missing ones (with their `.sha256`) with `gh release upload`.
-- **VS Code Marketplace:** the package counts as published once the
-  Marketplace lists the version. Open VSX is not checked; if only the Open VSX
-  upload failed, publish that `.vsix` to Open VSX by hand.
+- **VS Code Marketplace and Open VSX:** the package counts as published once
+  the Marketplace lists the version and, with `open-vsx: true`, Open VSX
+  serves it. A re-run uploads only to the registry still missing it.
 
 ## Case 3: the run is still going, or `tag` stopped waiting
 
@@ -129,6 +134,89 @@ In a verify-only run:
 A verify-only run never uploads, so it cannot finish a partial upload. Use
 `tag` for that.
 
+## What each channel allows again: the retry policy
+
+Channels differ in whether publishing again is safe. rab defines a
+retry policy per channel; it is not configured.
+
+| Channel | Policy | Publish again? | Done when | What `tag` again does | Needs a manual step |
+|---|---|---|---|---|---|
+| crates.io, PyPI, npm | `once` | never: a version is permanent (rule 1) | the registry serves the version | skips it | a partial PyPI upload (above) |
+| VS Code Marketplace, Open VSX | `once` | never for the same version, on each registry | the Marketplace lists it, and with [`open-vsx: true`](registries/vscode.md) Open VSX serves it too | skips it; with `open-vsx: true`, a version only one registry has is due, and the new run uploads only to the other | an Open VSX upload that failed for a package without `open-vsx: true` |
+| GitHub Releases | `finish` | only to finish a draft; a published release's files never change | the release is out of draft with its files | finishes a draft; skips a published one | missing assets on a published release (above) |
+| Homebrew tap | `idempotent` | yes: rendering the formula again and updating its branch and pull request is harmless | the tap's default branch has `Formula/<name>.rb` at the version, or a pull request from `<name>-<version>` is open on the tap; a prerelease is never put in the tap | selects the package again for `homebrew` only | merging the pull request (the tap's maintainers) |
+| Chocolatey | `until-accepted` | until the community repository has accepted or rejected the version | the API lists the version, or it is submitted (in its checks or moderation); a **rejected** version is terminal: never done, never due | selects the package again for `chocolatey` only; skips a rejected version with a note | a rejected version: fix the package and release a new version |
+
+`release.py status` prints each channel's policy and live state under its
+package.
+
+### How the state is read, and why
+
+- **Live, not recorded in tags.** The Homebrew and Chocolatey states are read
+  from the tap (GitHub's API) and from the community repository's API every
+  time `tag`, the gate or `status` needs them; nothing is written into the
+  record tags. A record tag records what was released and is never rewritten
+  for a run that published; a channel's state changes outside rab (a
+  maintainer merges or closes the pull request, moderators approve or reject
+  a package, someone copies a formula by hand), so a stored `homebrew: done`
+  could only go stale. The live state is the truth, and costs one or two
+  requests per channel.
+- **Submitted counts as done.** Chocolatey's moderation can take days, so
+  `tag` does not wait for it: a version in moderation is reported as
+  `submitted` and counts as done: pushing it again would only replace the
+  version under review. Likewise an open tap pull request counts as done:
+  merging it is the tap's decision.
+- **Rejected is terminal.** A version in moderation can be pushed again (the
+  new push replaces the one under review), but a rejected one never can:
+  `choco push` refuses it ("Package versions that are approved, rejected, or
+  exempted cannot be modified"). So a rejected version is neither done nor
+  due. The gate does not select it, `tag` does not retry or wait for it and
+  prints `note   chocolatey of <package> is rejected: publish a new version;
+  not retried`, and `status` shows `rejected: publish a new version`. Fix
+  what moderation objected to and release a new version of the package. The
+  package's other channels (Homebrew) are still finished as usual.
+- **A newer release supersedes an older one's channels.** `tag` goes back to
+  finish an older release's channels only while `HEAD` names that release (or
+  with `--release`); once `HEAD` names a newer one it prints a `note` and
+  releases `HEAD`, since a tap or package moving back to an older version
+  would be a downgrade.
+- **Other channels made from a release** fit the same model. Scoop (a bucket
+  repository) and AUR (a `PKGBUILD` pushed to the AUR's git) are `idempotent`
+  like Homebrew: done when the bucket's default branch or the AUR's RPC has
+  the version (or a bucket pull request is open). winget proposes a manifest
+  as a pull request on `microsoft/winget-pkgs`: `idempotent` while proposing,
+  done when the pull request is open or the manifest for the version is
+  merged. Each needs only a state function and a policy.
+
+## Case 5: the release is out, but Homebrew or Chocolatey is not
+
+For example, `publish-chocolatey` failed on a Chocolatey outage after
+`publish-github` published the release. Fix the cause outside the tagged
+commit (an expired API key, a tap token without pull-request access, an
+outage), then run `tag`. It goes back to the release's commit, sees the
+GitHub release is published but a channel made from it is not done, and
+pushes the release tag again with only that channel due:
+
+```text
+Release 0.2.0 from 3e9a... (release 0.2.0 is already tagged there)
+skip   onto-v0.2.0: onto 0.2.0 (crates.io) is already published
+finish onto-cli-v0.2.0: onto-cli 0.2.0 (github) is published; chocolatey is due (until-accepted)
+retag  release-0.2.0: its run ended failure; the new run publishes only what is still due
+tag    release-0.2.0 at 3e9a0b1c2d4f (starts the release run: onto-cli (chocolatey))
+```
+
+The new run's gate selects `onto-cli` for `chocolatey` only (its selection
+entry has `"channels": ["chocolatey"]`): the build plans nothing for it,
+`publish-github` is skipped, and `publish-chocolatey` runs. A run that
+*succeeded* without finishing a channel (for example, `publish-homebrew` without
+`HOMEBREW_TAP_TOKEN` only attaches the formula) is pushed again the same way.
+This needs the template's `publish-homebrew` and `publish-chocolatey` jobs to
+run when `publish-github` was skipped; see the [changelog](changelog.md).
+
+When `tag` has waited for a run, it polls a channel that is not done yet a
+few more times (five minutes), then names it in a `note` and returns rather
+than waiting for hours.
+
 ## Errors that need a decision
 
 `tag` and the gate refuse, rather than guess, in these cases:
@@ -136,8 +224,9 @@ A verify-only run never uploads, so it cannot finish a partial upload. Use
 | Message starts | Meaning and fix |
 |---|---|
 | `these tags already exist for something else` | A package tag on the remote is not that package's record. Give the package its own `tag:` format, or bump it. See [collisions](configuration.md#record-tags-and-collisions). |
-| `... has no release-kit.yml: the tag predates release-kit` | A record tag is on a commit from before adoption. Bump the package, or delete the stale tag if nothing was published from it. |
+| `... has no rab.yml (nor release-kit.yml): the tag predates the kit` | A record tag is on a commit from before adoption. Bump the package, or delete the stale tag if nothing was published from it. |
 | `... changes packages already tagged under the same version on other commits` | A split release. Release from the named commit (`--commit`), or bump those packages. |
 | `release-X is on <sha>, not <sha>, and its run there may have published` | Release from that commit (`--commit`) or wait for its run. |
 | `... is not on origin/main as last fetched` | Run `git fetch`, and release only merged commits. |
 | `... every package of release X is already published` | (gate) Nothing to do. |
+| `<tag> is at <sha>, not <sha>, the commit the gate checked` | (build) A record tag moved after the gate checked it, and nothing was built. Find out who moved it and why; put it back on the gated commit to run again, or tag a new release. |
