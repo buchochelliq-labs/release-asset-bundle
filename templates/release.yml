@@ -1,10 +1,10 @@
-# The buchochelliq-labs release workflow (release-kit), installed by
+# The buchochelliq-labs release workflow (rab, the Release Asset Bundle), installed by
 # `release.py install` when the repository had none. It is the repository's
-# own file: keep the publish jobs for the registries in release-kit.yml (what
+# own file: keep the publish jobs for the registries in rab.yml (what
 # gets built comes from its `artifacts`), and edit it as needed. Everything
-# under .github/release-kit/ is the installed kit and is not edited.
+# under .github/rab/ is the installed kit and is not edited.
 #
-# `python3 .github/release-kit/scripts/release.py tag` on the default branch
+# `python3 .github/rab/scripts/release.py tag` on the default branch
 # pushes the tags; the release tag starts this run, which checks it once, runs
 # CI once on the tagged commit, builds, publishes what is not yet published,
 # and then uses each package as a stranger would.
@@ -57,7 +57,7 @@ jobs:
           ref: refs/tags/${{ inputs.tag || github.ref_name }}
           persist-credentials: false
       - id: gate
-        uses: ./.github/release-kit/gate
+        uses: ./.github/rab/gate
         with:
           tag: ${{ inputs.tag || github.ref_name }}
           verify-only: ${{ inputs.verify_only == true }}
@@ -71,7 +71,7 @@ jobs:
     with:
       ref: ${{ needs.gate.outputs.sha }}
 
-  # Builds what release-kit.yml's `artifacts` declare, for the packages due,
+  # Builds what rab.yml's `artifacts` declare, for the packages due,
   # from the tagged commit: one job per artifact and target, each running the
   # artifact's `test` (if any) on what it built. Skipped in a verify-only run.
   build:
@@ -80,7 +80,7 @@ jobs:
     permissions:
       contents: read
       actions: read   # a ci-artifact reads this repository's CI artifacts
-    uses: ./.github/workflows/release-kit-build.yml
+    uses: ./.github/workflows/rab-build.yml
     with:
       sha: ${{ needs.gate.outputs.sha }}
       selection: ${{ needs.gate.outputs.selection }}
@@ -112,7 +112,7 @@ jobs:
         with:
           pattern: release--*
           path: dist
-      - uses: ./.github/release-kit/publish-github
+      - uses: ./.github/rab/publish-github
         with:
           selection: ${{ needs.gate.outputs.selection }}
           verify-only: ${{ needs.gate.outputs.verify-only }}
@@ -144,7 +144,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python3 -m pip install --quiet pyyaml
-      - uses: ./.github/release-kit/publish-homebrew
+      - uses: ./.github/rab/publish-homebrew
         with:
           selection: ${{ needs.gate.outputs.selection }}
           tap-token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
@@ -170,7 +170,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install --quiet pyyaml
-      - uses: ./.github/release-kit/publish-chocolatey
+      - uses: ./.github/rab/publish-chocolatey
         with:
           selection: ${{ needs.gate.outputs.selection }}
           api-key: ${{ secrets.CHOCOLATEY_API_KEY }}
@@ -211,11 +211,11 @@ jobs:
         if: needs.gate.outputs.verify-only != 'true'
         env:
           SELECTION: ${{ needs.gate.outputs.selection }}
-        run: python3 .github/release-kit/scripts/release.py preflight --registry crates.io --selection "$SELECTION"
+        run: python3 .github/rab/scripts/release.py preflight --registry crates.io --selection "$SELECTION"
       - id: auth
         if: steps.preflight.outputs.existing_crate == 'true'
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
-      - uses: ./.github/release-kit/publish-crates
+      - uses: ./.github/rab/publish-crates
         with:
           selection: ${{ needs.gate.outputs.selection }}
           new-crates: ${{ steps.preflight.outputs.new_crates || '[]' }}
@@ -248,7 +248,7 @@ jobs:
         with:
           pattern: release--*
           path: dist
-      - uses: ./.github/release-kit/publish-pypi
+      - uses: ./.github/rab/publish-pypi
         with:
           selection: ${{ needs.gate.outputs.selection }}
           verify-only: ${{ needs.gate.outputs.verify-only }}
@@ -280,7 +280,7 @@ jobs:
       - run: python3 -m pip install --quiet pyyaml
       - if: needs.gate.outputs.verify-only != 'true'
         run: npm ci
-      - uses: ./.github/release-kit/publish-npm
+      - uses: ./.github/rab/publish-npm
         with:
           selection: ${{ needs.gate.outputs.selection }}
           verify-only: ${{ needs.gate.outputs.verify-only }}
@@ -311,7 +311,7 @@ jobs:
         with:
           pattern: release--*
           path: dist
-      - uses: ./.github/release-kit/publish-vscode
+      - uses: ./.github/rab/publish-vscode
         with:
           selection: ${{ needs.gate.outputs.selection }}
           vsce-token: ${{ secrets.VSCE_PAT }}
@@ -367,7 +367,7 @@ jobs:
           VERIFY_ONLY: ${{ needs.gate.outputs.verify-only }}
           NEEDS: ${{ toJSON(needs) }}
         run: >-
-          python3 .github/release-kit/scripts/release.py record --tag "$TAG" --sha "$SHA"
+          python3 .github/rab/scripts/release.py record --tag "$TAG" --sha "$SHA"
           --selection "$SELECTION" --verify-only "$VERIFY_ONLY" --needs "$NEEDS" --out release-record.json
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

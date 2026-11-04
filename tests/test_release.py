@@ -1,8 +1,10 @@
-"""release.py: release-kit.yml checks, artifacts, tagging and the CI gate, on real git
+"""release.py: rab.yml checks, artifacts, tagging and the CI gate, on real git
 repositories in temporary directories. Registries and runs are faked."""
 
+import io
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -31,7 +33,7 @@ FILES = {
     "crates/core/src/lib.rs": "pub fn core() {}\n",
     "crates/tool/Cargo.toml": '[package]\nname = "tool"\nversion = "0.2.0"\n[dependencies]\ncore = { path = "../core" }\n',
     "crates/tool/src/main.rs": "fn main() {}\n",
-    "release-kit.yml": CONFIG,
+    "rab.yml": CONFIG,
 }
 
 
@@ -59,7 +61,7 @@ class Check(unittest.TestCase):
             "js/package.json": json.dumps({"name": "@org/lib", "version": "2.0.0"}),
             "ext/package.json": json.dumps({"name": "ext", "publisher": "org", "version": "0.3.0"}),
             "bin/Cargo.toml": '[package]\nname = "bin"\nversion = "1.2.3"\n',
-            "release-kit.yml": """
+            "rab.yml": """
 release:
   name_from: bin
 packages:
@@ -91,35 +93,35 @@ packages:
 
     def test_disagreements_are_reported(self):
         files = dict(FILES)
-        files["release-kit.yml"] = CONFIG.replace('version: "0.2.0"', 'version: "0.3.0"').replace(
+        files["rab.yml"] = CONFIG.replace('version: "0.2.0"', 'version: "0.3.0"').replace(
             "name: core", "name: kore", 1)
         errors = "\n".join(release.check(reader(files)))
-        self.assertIn("tool: release-kit.yml says 0.3.0, crates/tool/Cargo.toml says 0.2.0", errors)
+        self.assertIn("tool: rab.yml says 0.3.0, crates/tool/Cargo.toml says 0.2.0", errors)
         self.assertIn("kore: crates/core/Cargo.toml names the package 'core'", errors)
 
     def test_a_package_comes_after_what_it_depends_on(self):
         files = dict(FILES)
         head, core, tool = CONFIG.split("  - name: ")
-        files["release-kit.yml"] = head + "  - name: " + tool.rstrip() + "\n  - name: " + core
+        files["rab.yml"] = head + "  - name: " + tool.rstrip() + "\n  - name: " + core
         self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
 
     def test_record_tags_are_distinct_from_each_other_and_the_release_tag(self):
         files = dict(FILES)
-        files["release-kit.yml"] = CONFIG.replace('version: "0.2.0"\n', 'version: "0.2.0"\n    tag: "release-{version}"\n')
+        files["rab.yml"] = CONFIG.replace('version: "0.2.0"\n', 'version: "0.2.0"\n    tag: "release-{version}"\n')
         self.assertTrue(any("is the release tag" in e for e in release.check(reader(files))))
 
     def test_unknown_registry_and_unquoted_versions(self):
         files = dict(FILES)
-        files["release-kit.yml"] = CONFIG.replace("registry: crates.io", "registry: maven", 1)
+        files["rab.yml"] = CONFIG.replace("registry: crates.io", "registry: maven", 1)
         self.assertTrue(any("unknown registry 'maven'" in e for e in release.check(reader(files))))
-        files["release-kit.yml"] = CONFIG.replace('version: "0.1.0"', "version: 0.10")
+        files["rab.yml"] = CONFIG.replace('version: "0.1.0"', "version: 0.10")
         self.assertTrue(any("quote the version" in e for e in release.check(reader(files))))
 
 
 class Artifacts(unittest.TestCase):
     def config(self, package):
         files = {"bin/Cargo.toml": '[package]\nname = "app"\nversion = "1.0.0"\n',
-                 "release-kit.yml": "packages:\n  - " + package.strip().replace("\n", "\n    ") + "\n"}
+                 "rab.yml": "packages:\n  - " + package.strip().replace("\n", "\n    ") + "\n"}
         return reader(files)
 
     def test_artifacts_are_checked_against_their_registry(self):
@@ -156,7 +158,7 @@ class Artifacts(unittest.TestCase):
 
     def test_maturin_plans_wheels_per_target_and_an_sdist(self):
         files = {"py/pyproject.toml": '[project]\nname = "pkg"\nversion = "1.0"\n',
-                 "release-kit.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
+                 "rab.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
                                     '    version: "1.0"\n    artifacts: [{kind: maturin, targets: [x86_64-unknown-linux-gnu]}]\n'}
         jobs = release.plan(json.dumps([{"name": "pkg", "registry": "pypi"}]), read=reader(files))
         self.assertEqual([j["kind"] for j in jobs], ["maturin", "maturin-sdist"])
@@ -211,7 +213,7 @@ class CiArtifact(unittest.TestCase):
 
     def config(self, artifact):
         files = {"py/pyproject.toml": '[project]\nname = "pkg"\nversion = "1.0"\n',
-                 "release-kit.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
+                 "rab.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
                                     f'    version: "1.0"\n    artifacts: [{artifact}]\n'}
         return reader(files)
 
@@ -221,7 +223,7 @@ class CiArtifact(unittest.TestCase):
                 "version": "1.0", "registry": "pypi", "artifact": 42,
                 "sha256": hashlib.sha256(data).hexdigest(), "files": "dist/*.whl", "test": None, **extra}
 
-    def github(self, data, meta=None, compare=("ahead", ["release-kit.yml"])):
+    def github(self, data, meta=None, compare=("ahead", ["rab.yml"])):
         import hashlib
         meta = {"expired": False, "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
                 "workflow_run": {"head_sha": "c0ffee" * 6 + "abcd"}, **(meta or {})}
@@ -272,9 +274,9 @@ class CiArtifact(unittest.TestCase):
 
     def test_the_commit_that_records_the_pin_may_follow_the_build(self):
         # The pin cannot be in the commit that built the artifact: the commit
-        # that records it, changing only release-kit.yml, is the same release.
+        # that records it, changing only rab.yml, is the same release.
         data = self.archive({self.WHEEL: b"reviewed wheel"})
-        for compare in (("identical", []), ("ahead", ["release-kit.yml"])):
+        for compare in (("identical", []), ("ahead", ["rab.yml"])):
             self.assertEqual(self.promote(data, compare=compare), [("pkg-1.0-py3-none-any.whl", b"reviewed wheel")])
 
     def test_promotion_fails_closed(self):
@@ -283,8 +285,8 @@ class CiArtifact(unittest.TestCase):
             ("the archive's SHA-256", dict(job=self.job(data, sha256="0" * 64), meta={"digest": None})),
             ("GitHub records", dict(meta={"digest": "sha256:" + "1" * 64})),
             ("has expired", dict(meta={"expired": True})),
-            ("does not descend from", dict(compare=("diverged", ["release-kit.yml"]))),
-            ("src/app.py changed", dict(compare=("ahead", ["release-kit.yml", "src/app.py"]))),
+            ("does not descend from", dict(compare=("diverged", ["rab.yml"]))),
+            ("src/app.py changed", dict(compare=("ahead", ["rab.yml", "src/app.py"]))),
             ("no member matches", dict(job=self.job(data, files="dist/*.tar.gz"))),
         ]
         for message, kwargs in cases:
@@ -468,9 +470,9 @@ class Foreign(Repo):
             release.gate("release-0.2.0", status=self.status, output=out)
 
     def test_a_commit_without_release_kit_yml_is_named(self):
-        sh(self.work, "git", "rm", "-q", "release-kit.yml")
+        sh(self.work, "git", "rm", "-q", "rab.yml")
         old = self.commit("before release-kit")
-        with self.assertRaisesRegex(RuntimeError, "core-v0.1.0 is on .*which has no release-kit.yml: the tag predates"):
+        with self.assertRaisesRegex(RuntimeError, "core-v0.1.0 is on .*which has no rab.yml \(nor release-kit.yml\): the tag predates"):
             release.release_at(old, release.Package("core", "crates.io", "m", "0.1.0"))
 
 
@@ -630,7 +632,7 @@ class ArtifactTests(unittest.TestCase):
 
     def test_the_plan_carries_the_test_to_the_targets_it_names(self):
         files = {"py/pyproject.toml": '[project]\nname = "pkg"\nversion = "1.0"\n',
-                 "release-kit.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
+                 "rab.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
                                     '    version: "1.0"\n    artifacts:\n      - kind: maturin\n'
                                     '        targets: [x86_64-unknown-linux-gnu, x86_64-apple-darwin]\n'
                                     '        test: {run: "pytest", targets: [x86_64-unknown-linux-gnu]}\n'}
@@ -641,10 +643,10 @@ class ArtifactTests(unittest.TestCase):
 
     def test_a_malformed_test_is_refused(self):
         files = {"bin/Cargo.toml": '[package]\nname = "app"\nversion = "1.0.0"\n',
-                 "release-kit.yml": 'packages:\n  - name: app\n    registry: github\n    manifest: bin/Cargo.toml\n'
+                 "rab.yml": 'packages:\n  - name: app\n    registry: github\n    manifest: bin/Cargo.toml\n'
                                     '    version: "1.0.0"\n    artifacts: [{kind: rust-binary, bin: app, test: {cmd: x}}]\n'}
         self.assertTrue(any("test is a command" in e for e in release.check(reader(files))))
-        files["release-kit.yml"] = files["release-kit.yml"].replace(
+        files["rab.yml"] = files["rab.yml"].replace(
             "kind: rust-binary, bin: app, test: {cmd: x}",
             "kind: command, run: make, outputs: '*.txt', test: {run: x, targets: [x86_64-unknown-linux-gnu]}")
         self.assertTrue(any("command is not built per target" in e for e in release.check(reader(files))),
@@ -674,7 +676,7 @@ class MaturinFromCargo(unittest.TestCase):
         "crates/cli/Cargo.toml": '[package]\nname = "cli"\nversion.workspace = true\n',
         "pyproject.toml": '[project]\nname = "tool"\ndynamic = ["version"]\n'
                           '[tool.maturin]\nbindings = "bin"\nmanifest-path = "crates/cli/Cargo.toml"\n',
-        "release-kit.yml": 'packages:\n  - name: tool\n    registry: pypi\n    manifest: pyproject.toml\n'
+        "rab.yml": 'packages:\n  - name: tool\n    registry: pypi\n    manifest: pyproject.toml\n'
                            '    version: "0.2.0rc1"\n    artifacts:\n      - kind: maturin\n'
                            '        targets: [x86_64-unknown-linux-musl]\n        prepare: ./notices.sh\n',
     }
@@ -705,7 +707,7 @@ class MaturinFromCargo(unittest.TestCase):
                 os.chdir(cwd)
 
     def test_a_blank_prepare_is_refused(self):
-        files = {**self.FILES, "release-kit.yml": self.FILES["release-kit.yml"].replace("./notices.sh", "''")}
+        files = {**self.FILES, "rab.yml": self.FILES["rab.yml"].replace("./notices.sh", "''")}
         self.assertTrue(any("prepare is a command" in e for e in release.check(reader(files))))
 
 
@@ -715,7 +717,7 @@ class GitHubReleaseOptions(unittest.TestCase):
     def config(self, options):
         return reader({
             "bin/Cargo.toml": '[package]\nname = "app"\nversion = "1.0.0"\n',
-            "release-kit.yml": 'packages:\n  - name: app\n    registry: github\n    manifest: bin/Cargo.toml\n'
+            "rab.yml": 'packages:\n  - name: app\n    registry: github\n    manifest: bin/Cargo.toml\n'
                                '    version: "1.0.0"\n    tag: "v{version}"\n'
                                '    artifacts: [{kind: rust-binary, bin: app}]\n' + options,
         })
@@ -731,7 +733,7 @@ class GitHubReleaseOptions(unittest.TestCase):
         for options, message in cases.items():
             self.assertIn(message, "\n".join(release.check(self.config(options))), options)
         crate = reader({"c/Cargo.toml": '[package]\nname = "c"\nversion = "1.0.0"\n',
-                        "release-kit.yml": 'packages:\n  - name: c\n    registry: crates.io\n'
+                        "rab.yml": 'packages:\n  - name: c\n    registry: crates.io\n'
                                            '    manifest: c/Cargo.toml\n    version: "1.0.0"\n    attest: true\n'})
         self.assertIn("only apply to a github package", "\n".join(release.check(crate)))
 
@@ -791,7 +793,7 @@ class Channels(unittest.TestCase):
         os.chdir(self.dir.name)
         files = {
             "Cargo.toml": '[package]\nname = "tool"\nversion = "1.2.0"\n',
-            "release-kit.yml": self.CONFIG,
+            "rab.yml": self.CONFIG,
             "packaging/tool.rb.tmpl": 'class Tool < Formula\n  version "${version}"\n'
                                       '  url "${url_aarch64_apple_darwin}"\n  sha256 "${sha256_aarch64_apple_darwin}"\n'
                                       '  def install\n    bin.install "tool"  # #{prefix} stays\n  end\nend\n',
@@ -815,7 +817,7 @@ class Channels(unittest.TestCase):
         for bad, message in [("{tap: org/homebrew-tap}", "homebrew needs formula"),
                              ("{tap: nope, formula: f}", "tap is owner/repository"),
                              ("{tap: org/t, formula: f, url: x}", "does not take url")]:
-            Path("release-kit.yml").write_text(self.CONFIG.replace(
+            Path("rab.yml").write_text(self.CONFIG.replace(
                 "{tap: org/homebrew-tap, formula: packaging/tool.rb.tmpl}", bad))
             self.assertIn(message, "\n".join(release.check(files_on_disk)), bad)
 
@@ -940,14 +942,14 @@ class OpenVsx(unittest.TestCase):
 
     def test_it_is_checked_and_only_for_vscode(self):
         files = {"ext/package.json": json.dumps({"name": "ext", "publisher": "org", "version": "1.0.0"}),
-                 "release-kit.yml": "packages:\n  - name: org.ext\n    registry: vscode\n"
+                 "rab.yml": "packages:\n  - name: org.ext\n    registry: vscode\n"
                                     "    manifest: ext/package.json\n    version: \"1.0.0\"\n"
                                     "    artifacts: [{kind: vsix}]\n    open-vsx: true\n"}
         self.assertEqual(release.check(reader(files)), [])
         self.assertIs(release.load(reader(files)).packages[0].open_vsx, True)
-        files["release-kit.yml"] = files["release-kit.yml"].replace("open-vsx: true", "open-vsx: yes please")
+        files["rab.yml"] = files["rab.yml"].replace("open-vsx: true", "open-vsx: yes please")
         self.assertIn("org.ext: open-vsx is true or false", release.check(reader(files)))
-        files = dict(FILES, **{"release-kit.yml": CONFIG + "    open-vsx: true\n"})
+        files = dict(FILES, **{"rab.yml": CONFIG + "    open-vsx: true\n"})
         self.assertIn("tool: open-vsx only applies to a vscode package", release.check(reader(files)))
 
     def test_the_gate_carries_it_in_the_selection(self):
@@ -981,7 +983,7 @@ class OpenVsx(unittest.TestCase):
             self.preflight(True, True)
 
     def test_an_open_vsx_upload_needs_its_token(self):
-        with self.assertRaisesRegex(RuntimeError, "org.ext: release-kit.yml says open-vsx: true, but no Open VSX"):
+        with self.assertRaisesRegex(RuntimeError, "org.ext: rab.yml says open-vsx: true, but no Open VSX"):
             self.preflight(True, False, token=False)
 
     def test_verify_waits_for_open_vsx_too(self):
@@ -1036,7 +1038,7 @@ class ReleaseRecord(unittest.TestCase):
         "c/Cargo.toml": '[package]\nname = "core"\nversion = "0.1.0"\n',
         "t/Cargo.toml": '[package]\nname = "tool"\nversion = "0.2.0"\n',
         "py/pyproject.toml": '[project]\nname = "tool-py"\nversion = "0.2.0"\n',
-        "release-kit.yml": (
+        "rab.yml": (
             "packages:\n"
             "  - {name: core, registry: crates.io, manifest: c/Cargo.toml, version: '0.1.0'}\n"
             "  - {name: tool, registry: crates.io, manifest: t/Cargo.toml, version: '0.2.0'}\n"
@@ -1117,7 +1119,7 @@ class ReleaseRecord(unittest.TestCase):
                           "result": "partial"}, "the formula is due again (#20): `tag` finishes it")
         self.assertEqual(document["jobs"]["publish-npm"], "skipped")
         packages = self.by_name(document)
-        self.assertEqual(list(packages), ["core", "tool", "tool-py", "tool-bin"], "release-kit.yml's order")
+        self.assertEqual(list(packages), ["core", "tool", "tool-py", "tool-bin"], "rab.yml's order")
         self.assertEqual(packages["core"], {
             "name": "core", "registry": "crates.io", "version": "0.1.0", "tag": "core-v0.1.0", "selected": False,
             "outcome": "already-published", "job": None, "url": "https://crates.io/crates/core/0.1.0", "files": []})
@@ -1167,7 +1169,7 @@ class ReleaseRecord(unittest.TestCase):
 
     def test_a_registry_that_does_not_answer_is_unknown(self):
         files = dict(self.FILES)
-        files["release-kit.yml"] = files["release-kit.yml"].replace("name: core,", "name: lost,")
+        files["rab.yml"] = files["rab.yml"].replace("name: core,", "name: lost,")
         files["c/Cargo.toml"] = files["c/Cargo.toml"].replace('"core"', '"lost"')
         self.FILES = files
         document = self.record(self.selection("lost"), self.needs(publish_crates="cancelled"))
@@ -1229,7 +1231,7 @@ class ReleaseRecord(unittest.TestCase):
         # open-vsx: true, and gives Open VSX's page too.
         self.FILES = {
             "ext/package.json": json.dumps({"name": "ext", "publisher": "org", "version": "1.0.0"}),
-            "release-kit.yml": "packages:\n  - name: org.ext\n    registry: vscode\n"
+            "rab.yml": "packages:\n  - name: org.ext\n    registry: vscode\n"
                                "    manifest: ext/package.json\n    version: '1.0.0'\n"
                                "    artifacts: [{kind: vsix}]\n    open-vsx: true\n",
         }
@@ -1263,7 +1265,7 @@ class ReleaseRecord(unittest.TestCase):
             late = self.record(selection, self.needs(publish_vscode="failure"))
             self.assertEqual((late["packages"][0]["outcome"], late["result"]), ("published", "partial"))
             # Without open-vsx: true, Open VSX is neither asked nor recorded.
-            self.FILES = dict(self.FILES, **{"release-kit.yml": self.FILES["release-kit.yml"].replace(
+            self.FILES = dict(self.FILES, **{"rab.yml": self.FILES["rab.yml"].replace(
                 "    open-vsx: true\n", "")})
             on["open-vsx"] = False
             plain = self.record(selection.replace(', "open-vsx": true', ""), self.needs(publish_vscode="failure"))
@@ -1344,7 +1346,7 @@ class ReleaseRuns(unittest.TestCase):
     actions/cache-poisoning queries)."""
 
     def test_builds_check_out_a_record_tag_and_stop_unless_it_names_the_gated_commit(self):
-        workflow = kit_yaml("workflows/release-kit-build.yml")
+        workflow = kit_yaml("workflows/rab-build.yml")
         for name, job in workflow["jobs"].items():
             steps = job["steps"]
             checkout = steps[0]
@@ -1356,10 +1358,10 @@ class ReleaseRuns(unittest.TestCase):
             self.assertNotIn("uses", check, name)
             self.assertEqual(check["env"]["SHA"], "${{ inputs.sha }}", name)
             self.assertEqual(checkout["with"]["ref"], "refs/tags/" + check["env"]["TAG"], name)
-        self.assertNotIn("ref: ${{ inputs.sha }}", (KIT / "workflows/release-kit-build.yml").read_text())
+        self.assertNotIn("ref: ${{ inputs.sha }}", (KIT / "workflows/rab-build.yml").read_text())
 
     def test_the_check_refuses_a_tag_moved_since_the_gate(self):
-        script = kit_yaml("workflows/release-kit-build.yml")["jobs"]["build"]["steps"][1]["run"]
+        script = kit_yaml("workflows/rab-build.yml")["jobs"]["build"]["steps"][1]["run"]
         with tempfile.TemporaryDirectory() as d:
             sh(d, "git", "init", "-q", "-b", "main")
             sh(d, "git", "commit", "-q", "--allow-empty", "-m", "gated")
@@ -1376,7 +1378,7 @@ class ReleaseRuns(unittest.TestCase):
 
     def test_the_plan_names_each_jobs_record_tag(self):
         files = {"py/pyproject.toml": '[project]\nname = "pkg"\nversion = "1.0"\n',
-                 "release-kit.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
+                 "rab.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
                                     '    version: "1.0"\n    tag: "python-v{version}"\n'
                                     '    artifacts: [{kind: python}]\n'}
         jobs = release.plan(json.dumps([{"name": "pkg", "registry": "pypi"}]), read=reader(files))
@@ -1405,7 +1407,7 @@ class ReleaseRuns(unittest.TestCase):
     def test_a_channel_only_selection_plans_nothing_and_its_entry_has_a_record_tag(self):
         # #20 with the build's checkout: plan checks out selection[0].tag,
         # which the gate found on sha; the package itself builds nothing.
-        files = dict(FILES, **{"release-kit.yml": CONFIG + (
+        files = dict(FILES, **{"rab.yml": CONFIG + (
             "  - name: tool-bin\n    registry: github\n    manifest: crates/tool/Cargo.toml\n    version: '0.2.0'\n"
             "    tag: 'v{version}'\n    artifacts: [{kind: rust-binary, bin: tool}]\n"
             "    homebrew: {tap: org/homebrew-tap, formula: tool.rb.tmpl}\n")})
@@ -1447,32 +1449,32 @@ class Install(unittest.TestCase):
 
     def test_install_copies_the_kit_and_a_starter_workflow(self):
         written = release.install(self.repo)
-        for path in [".github/release-kit/scripts/release.py", ".github/release-kit/gate/action.yml",
-                     ".github/release-kit/plan/action.yml", ".github/release-kit/build/action.yml",
-                     ".github/release-kit/publish-github/action.yml", ".github/workflows/release-kit-build.yml",
-                     ".github/workflows/release.yml", ".github/release-kit/manifest.json"]:
+        for path in [".github/rab/scripts/release.py", ".github/rab/gate/action.yml",
+                     ".github/rab/plan/action.yml", ".github/rab/build/action.yml",
+                     ".github/rab/publish-github/action.yml", ".github/workflows/rab-build.yml",
+                     ".github/workflows/release.yml", ".github/rab/manifest.json"]:
             self.assertIn(path, written)
             self.assertTrue((self.repo / path).is_file(), path)
-        manifest = json.loads((self.repo / ".github/release-kit/manifest.json").read_text())
-        self.assertEqual(manifest["source"], "buchochelliq-labs/release-kit")
+        manifest = json.loads((self.repo / ".github/rab/manifest.json").read_text())
+        self.assertEqual(manifest["source"], "buchochelliq-labs/release-asset-bundle")
         self.assertEqual(release.vendored(self.repo), [])
         # Everything is used by local path: public repositories can run it.
         workflow = (self.repo / ".github/workflows/release.yml").read_text()
-        self.assertIn("uses: ./.github/release-kit/gate", workflow)
-        self.assertNotIn("buchochelliq-labs/release-kit/", workflow)
+        self.assertIn("uses: ./.github/rab/gate", workflow)
+        self.assertNotIn("buchochelliq-labs/release-asset-bundle/", workflow)
 
     def test_edits_and_additions_to_the_copy_are_caught(self):
         release.install(self.repo)
-        gate = self.repo / ".github/release-kit/gate/action.yml"
+        gate = self.repo / ".github/rab/gate/action.yml"
         gate.write_text(gate.read_text() + "# local tweak\n")
-        (self.repo / ".github/release-kit/extra.sh").write_text("echo\n")
+        (self.repo / ".github/rab/extra.sh").write_text("echo\n")
         problems = "\n".join(release.vendored(self.repo))
         self.assertIn("gate/action.yml was edited", problems)
-        self.assertIn("extra.sh is not part of release-kit", problems)
+        self.assertIn("extra.sh is not part of the kit", problems)
 
     def test_installing_again_replaces_the_copy_and_keeps_the_release_workflow(self):
         release.install(self.repo)
-        (self.repo / ".github/release-kit/extra.sh").write_text("echo\n")
+        (self.repo / ".github/rab/extra.sh").write_text("echo\n")
         own = self.repo / ".github/workflows/release.yml"
         own.write_text(own.read_text() + "# this repository's own changes\n")
         release.install(self.repo)
@@ -1481,10 +1483,10 @@ class Install(unittest.TestCase):
 
     def test_install_needs_a_release_kit_checkout(self):
         release.install(self.repo)
-        with self.assertRaisesRegex(RuntimeError, "release-kit checkout"):
-            release.install(Path(self.dir.name) / "other", kit=self.repo / ".github/release-kit")
+        with self.assertRaisesRegex(RuntimeError, "checkout of the kit"):
+            release.install(Path(self.dir.name) / "other", kit=self.repo / ".github/rab")
         self.assertEqual(release.vendored(Path(self.dir.name)), [
-            ".github/release-kit/manifest.json is missing: install release-kit (release.py install)"])
+            ".github/rab/manifest.json is missing: install rab (release.py install)"])
 
 
 class Sync(unittest.TestCase):
@@ -1494,13 +1496,193 @@ class Sync(unittest.TestCase):
             for path, text in FILES.items():
                 (base / path).parent.mkdir(parents=True, exist_ok=True)
                 (base / path).write_text(text)
-            (base / "release-kit.yml").write_text("# keep me\n" + CONFIG)
+            (base / "rab.yml").write_text("# keep me\n" + CONFIG)
             (base / "crates/tool/Cargo.toml").write_text(FILES["crates/tool/Cargo.toml"].replace("0.2.0", "0.2.1"))
-            changes = release.sync(path=base / "release-kit.yml")
+            changes = release.sync(path=base / "rab.yml")
             self.assertEqual(changes, ["tool: 0.2.0 -> 0.2.1"])
-            text = (base / "release-kit.yml").read_text()
+            text = (base / "rab.yml").read_text()
             self.assertTrue(text.startswith("# keep me") and 'version: "0.2.1"' in text)
 
+
+
+# ---------------------------------------------------------------------------
+# 2.0.0: release-kit is renamed rab; release-kit 1.x's names keep working,
+# with a warning, until 3.0.0
+
+def old_names(files):
+    return {("release-kit.yml" if path == "rab.yml" else path): text for path, text in files.items()}
+
+
+class OldNames(unittest.TestCase):
+    def setUp(self):
+        release._warned.clear()
+
+    def warnings(self, call, *args):
+        with unittest.mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            result = call(*args)
+        return result, err.getvalue()
+
+    def test_release_kit_yml_is_read_with_a_warning(self):
+        loaded, err = self.warnings(release.load, reader(old_names(FILES)))
+        self.assertEqual(loaded.name, "0.2.0")
+        self.assertIn("release-kit.yml is release-kit 1.x's name for rab.yml; rename it (git mv release-kit.yml "
+                      "rab.yml", err)
+        self.assertEqual(release.check(reader(old_names(FILES))), [])
+        # Once per run, not once per read.
+        self.assertEqual(self.warnings(release.load, reader(old_names(FILES)))[1], "")
+
+    def test_rab_yml_is_read_without_one(self):
+        self.assertEqual(self.warnings(release.load, reader(FILES))[1], "")
+
+    def test_both_names_are_refused(self):
+        both = {**FILES, "release-kit.yml": CONFIG}
+        with self.assertRaisesRegex(ValueError, "both rab.yml and release-kit.yml exist: keep rab.yml"):
+            release.load(reader(both))
+        self.assertEqual(release.check(reader(both)), [
+            "both rab.yml and release-kit.yml exist: keep rab.yml (rab 2.x's name) and delete release-kit.yml"])
+
+    def test_neither_name_raises_what_reading_rab_yml_raised(self):
+        files = {k: v for k, v in FILES.items() if k != "rab.yml"}
+        with self.assertRaisesRegex(FileNotFoundError, "rab.yml"):
+            release.load(reader(files))
+
+    def test_an_old_name_is_read_at_a_commit(self):
+        with tempfile.TemporaryDirectory() as d:
+            work = Path(d)
+            sh(work, "git", "init", "-q", "-b", "main")
+            for path, text in old_names(FILES).items():
+                (work / path).parent.mkdir(parents=True, exist_ok=True)
+                (work / path).write_text(text)
+            sh(work, "git", "add", "-A")
+            sh(work, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "1.x")
+            with unittest.mock.patch.object(release, "root", return_value=work):
+                loaded, err = self.warnings(release.release_at, sh(work, "git", "rev-parse", "HEAD"))
+        self.assertEqual(loaded.tag, "release-0.2.0")
+        self.assertIn("release-kit.yml is release-kit 1.x's name", err)
+
+    def test_sync_and_the_config_path_follow_the_old_name(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            for path, text in old_names(FILES).items():
+                (base / path).parent.mkdir(parents=True, exist_ok=True)
+                (base / path).write_text(text)
+            (base / "crates/tool/Cargo.toml").write_text(FILES["crates/tool/Cargo.toml"].replace("0.2.0", "0.2.1"))
+            path, err = self.warnings(release.config_path, base)
+            self.assertEqual(path, base / "release-kit.yml")
+            self.assertIn("rename it", err)
+            self.assertEqual(release.sync(path=path), ["tool: 0.2.0 -> 0.2.1"])
+            self.assertIn('version: "0.2.1"', (base / "release-kit.yml").read_text())
+            self.assertFalse((base / "rab.yml").exists())
+            (base / "rab.yml").write_text(CONFIG)
+            with self.assertRaisesRegex(ValueError, "both rab.yml and release-kit.yml exist"):
+                release.config_path(base)
+
+    def test_the_old_offline_variable_is_read_with_a_warning(self):
+        with unittest.mock.patch.dict(os.environ, {"RELEASE_KIT_OFFLINE": "1"}):
+            os.environ.pop("RAB_OFFLINE", None)
+            offline, err = self.warnings(release.offline)
+        self.assertTrue(offline)
+        self.assertIn("RELEASE_KIT_OFFLINE is release-kit 1.x's name: set RAB_OFFLINE", err)
+        with unittest.mock.patch.dict(os.environ, {"RELEASE_KIT_OFFLINE": "1", "RAB_OFFLINE": "0"}):
+            self.assertFalse(release.offline(), "the new name wins")
+        with unittest.mock.patch.dict(os.environ, {"RAB_OFFLINE": "yes"}):
+            os.environ.pop("RELEASE_KIT_OFFLINE", None)
+            self.assertTrue(release.offline())
+
+    def test_the_version_is_the_changelog_s_newest(self):
+        changelog = (KIT / "docs" / "changelog.md").read_text(encoding="utf-8")
+        newest = re.search(r"^### v(\d+\.\d+\.\d+)", changelog, re.M)[1]
+        self.assertEqual(release.VERSION, newest)
+        self.assertNotIn("### Unreleased", changelog.split(f"### v{newest}")[0])
+
+
+class Migrate(unittest.TestCase):
+    """`install` into a repository with release-kit 1.x's layout moves it to rab's."""
+
+    RELEASE_YML = ("jobs:\n  gate:\n    steps:\n      - uses: ./.github/release-kit/gate\n"
+                   "  build:\n    uses: ./.github/workflows/release-kit-build.yml\n"
+                   "  record:\n    steps:\n      - run: python3 .github/release-kit/scripts/release.py record\n")
+
+    def setUp(self):
+        release._warned.clear()
+        self.dir = tempfile.TemporaryDirectory()
+        self.repo = Path(self.dir.name) / "repo"
+        self.repo.mkdir()
+        sh(self.repo, "git", "init", "-q", "-b", "main")
+        # release-kit 1.x's layout: what its install wrote.
+        release.install(self.repo)
+        (self.repo / ".github/rab").rename(self.repo / ".github/release-kit")
+        (self.repo / ".github/workflows/rab-build.yml").rename(self.repo / ".github/workflows/release-kit-build.yml")
+        manifest = self.repo / ".github/release-kit/manifest.json"
+        data = json.loads(manifest.read_text())
+        data["files"] = {path.replace(".github/rab/", ".github/release-kit/")
+                         .replace("rab-build.yml", "release-kit-build.yml"): sha for path, sha in data["files"].items()}
+        manifest.write_text(json.dumps(data))
+        (self.repo / ".github/workflows/release.yml").write_text(self.RELEASE_YML)
+        (self.repo / ".github/workflows/ci.yml").write_text(
+            "jobs:\n  t:\n    steps:\n      - run: python3 .github/release-kit/scripts/release.py vendored\n")
+        (self.repo / "release-kit.yml").write_text(CONFIG)
+        sh(self.repo, "git", "add", "-A")
+        sh(self.repo, "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "release-kit 1.x")
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def test_vendored_accepts_the_old_path_with_a_warning(self):
+        with unittest.mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(release.vendored(self.repo), [])
+        self.assertIn("the installed copy is at .github/release-kit/, release-kit 1.x's path", err.getvalue())
+        gate = self.repo / ".github/release-kit/gate/action.yml"
+        gate.write_text(gate.read_text() + "# tweak\n")
+        self.assertEqual(release.vendored(self.repo), [
+            ".github/release-kit/gate/action.yml was edited; the kit's files change only by installing again"])
+
+    def test_install_migrates_the_old_layout(self):
+        with unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            release.install(self.repo)
+        printed = out.getvalue()
+        self.assertTrue((self.repo / "rab.yml").is_file())
+        self.assertFalse((self.repo / "release-kit.yml").exists())
+        self.assertIn("R  release-kit.yml -> rab.yml", sh(self.repo, "git", "status", "--porcelain"), "git mv")
+        self.assertFalse((self.repo / ".github/release-kit").exists())
+        self.assertFalse((self.repo / ".github/workflows/release-kit-build.yml").exists())
+        self.assertTrue((self.repo / ".github/workflows/rab-build.yml").is_file())
+        self.assertEqual((self.repo / ".github/workflows/release.yml").read_text(), self.RELEASE_YML.replace(
+            ".github/release-kit/", ".github/rab/").replace("release-kit-build.yml", "rab-build.yml"))
+        self.assertIn("python3 .github/rab/scripts/release.py vendored",
+                      (self.repo / ".github/workflows/ci.yml").read_text())
+        self.assertEqual(release.vendored(self.repo), [])
+        for line in ["renamed release-kit.yml -> rab.yml (git mv)", "removed .github/release-kit/",
+                     "removed .github/workflows/release-kit-build.yml",
+                     "rewrote 3 old paths in .github/workflows/release.yml",
+                     "rewrote 1 old path in .github/workflows/ci.yml"]:
+            self.assertIn(line, printed)
+        with unittest.mock.patch.object(release, "root", return_value=self.repo), \
+                unittest.mock.patch("sys.stderr", new_callable=io.StringIO) as err:
+            self.assertEqual(release.load(release.files_on_disk(self.repo)).name, "0.2.0")
+        self.assertEqual(err.getvalue(), "", "nothing old is left to warn about")
+
+    def test_an_untracked_old_config_is_renamed(self):
+        sh(self.repo, "git", "rm", "-q", "--cached", "release-kit.yml")
+        with unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            release.install(self.repo)
+        self.assertIn("renamed release-kit.yml -> rab.yml\n", out.getvalue())
+        self.assertTrue((self.repo / "rab.yml").is_file())
+
+    def test_install_refuses_both_config_names_and_changes_nothing(self):
+        (self.repo / "rab.yml").write_text(CONFIG)
+        with self.assertRaisesRegex(RuntimeError, "both rab.yml and release-kit.yml exist"):
+            release.install(self.repo)
+        self.assertTrue((self.repo / ".github/release-kit/manifest.json").is_file())
+        self.assertFalse((self.repo / ".github/rab").exists())
+        self.assertEqual((self.repo / ".github/workflows/release.yml").read_text(), self.RELEASE_YML)
+
+    def test_a_copy_left_at_the_old_path_is_a_problem(self):
+        with unittest.mock.patch("sys.stdout", new_callable=io.StringIO):
+            release.install(self.repo)
+        (self.repo / ".github/release-kit").mkdir()
+        self.assertIn(".github/release-kit/ is left from release-kit 1.x: delete it (install migrates it)",
+                      release.vendored(self.repo))
 
 
 # ---------------------------------------------------------------------------
@@ -1518,8 +1700,12 @@ class RetryPolicy(unittest.TestCase):
             ("chocolatey", {"package": "p"}), ("homebrew", {"tap": "o/t", "formula": "f.rb"})))
         self.assertEqual(release.channels_of(tool), ["github", "homebrew", "chocolatey"])
         self.assertEqual(release.channels_of(release.Package("core", "crates.io", "m", "0.1.0")), ["crates.io"])
-        states = {"homebrew": "proposed", "chocolatey": "rejected"}
-        self.assertEqual(release.pending_channels(tool, lambda p, c: states[c]), {"chocolatey": "rejected"})
+        states = {"homebrew": "proposed", "chocolatey": "due"}
+        self.assertEqual(release.pending_channels(tool, lambda p, c: states[c]), {"chocolatey": "due"})
+        # Rejected is terminal: a rejected version can never be pushed again.
+        states, ended = {"homebrew": "due", "chocolatey": "rejected"}, {}
+        self.assertEqual(release.pending_channels(tool, lambda p, c: states[c], ended), {"homebrew": "due"})
+        self.assertEqual(ended, {"chocolatey": "rejected"})
         states = {"homebrew": "due", "chocolatey": "submitted"}
         self.assertEqual(release.pending_channels(tool, lambda p, c: states[c]), {"homebrew": "due"})
 
@@ -1606,6 +1792,7 @@ class ChocolateyState(unittest.TestCase):
     def test_moderation_counts_as_done_and_a_rejection_does_not(self):
         self.assertIn("submitted", release.DONE)
         self.assertNotIn("rejected", release.DONE)
+        self.assertEqual(release.state_text("rejected"), "rejected: publish a new version")
 
     # choco 2.x's output for a version the community repository already has
     # (its NugetPush.cs), and NuGetGallery's own message as choco 1.x shows it.
@@ -1620,7 +1807,7 @@ class ChocolateyState(unittest.TestCase):
               "    chocolatey: {package: packaging/choco}\n")
 
     def refused(self, log, state):
-        files = {"Cargo.toml": '[package]\nname = "tool"\nversion = "1.2.0"\n', "release-kit.yml": self.CONFIG}
+        files = {"Cargo.toml": '[package]\nname = "tool"\nversion = "1.2.0"\n', "rab.yml": self.CONFIG}
         asked = []
 
         def state_of(package, channel):
@@ -1639,7 +1826,7 @@ class ChocolateyState(unittest.TestCase):
         self.assertEqual(self.refused(self.EXISTS_V2, RuntimeError("no answer")), "unknown")
 
     def test_a_rejected_version_cannot_be_pushed_again(self):
-        with self.assertRaisesRegex(RuntimeError, "rejected this version.*release a new version"):
+        with self.assertRaisesRegex(RuntimeError, "Chocolatey rejected: publish a new version.*cannot be pushed"):
             self.refused(self.EXISTS_V2, "rejected")
 
     def test_any_other_push_failure_still_fails(self):
@@ -1700,7 +1887,7 @@ class FinishChannels(Repo):
 
     def setUp(self):
         super().setUp()
-        self.write({"release-kit.yml": DERIVED_CONFIG})
+        self.write({"rab.yml": DERIVED_CONFIG})
         self.first = self.commit("channels")
         self.states = {}
         self.success = {"status": "completed", "conclusion": "success", "url": "u", "head_sha": self.first,
@@ -1766,12 +1953,12 @@ class FinishChannels(Repo):
         self.write({"README.md": "later\n"})
         self.commit("docs")
         self.publish_all()
-        self.states = {"chocolatey": "rejected"}
+        self.states = {"chocolatey": "due"}
         waits, out = self.run_tag(run=lambda tag: self.success)
         self.assertIn("release 0.2.0 is already tagged there", out)
         self.assertIn("skip   core-v0.1.0", out)
         self.assertIn("finish tool-v0.2.0: tool 0.2.0 (github) is published; homebrew is due (idempotent), "
-                      "chocolatey is rejected (until-accepted)", out)
+                      "chocolatey is due (until-accepted)", out)
         self.assertIn("retag  release-0.2.0: its run ended success", out)
         self.assertEqual(waits, [("release-0.2.0", [("tool", "homebrew"), ("tool", "chocolatey")])])
         tags = self.remote_tags()
@@ -1793,7 +1980,7 @@ class FinishChannels(Repo):
     def test_a_newer_release_on_head_is_not_held_back_by_an_older_ones_channels(self):
         self.run_tag()
         self.publish_all()
-        self.write({"release-kit.yml": DERIVED_CONFIG.replace('"0.2.0"', '"0.3.0"'),
+        self.write({"rab.yml": DERIVED_CONFIG.replace('"0.2.0"', '"0.3.0"'),
                     "crates/tool/Cargo.toml": FILES["crates/tool/Cargo.toml"].replace("0.2.0", "0.3.0")})
         head = self.commit("bump tool")
         waits, out = self.run_tag(run=lambda tag: self.success)
@@ -1801,6 +1988,26 @@ class FinishChannels(Repo):
         self.assertIn("run `tag --release 0.2.0` to finish them", out)
         self.assertEqual(self.remote_tags()["release-0.3.0"], head)
         self.assertEqual(waits[0][0], "release-0.3.0")
+
+    def test_a_rejected_chocolatey_version_is_terminal(self):
+        self.run_tag()
+        self.publish_all()
+        self.states = {"homebrew": "merged", "chocolatey": "rejected"}
+        # Not retried by `tag`: nothing is pushed or waited for.
+        waits, out = self.run_tag(run=lambda tag: self.success)
+        self.assertEqual(waits, [])
+        self.assertIn("note   chocolatey of tool 0.2.0 (github) is rejected: publish a new version; not retried", out)
+        self.assertIn("skip   tool-v0.2.0", out)
+        # Not selected by the gate.
+        with self.assertRaisesRegex(RuntimeError, "already published"):
+            self.gate()
+        # Reported by `status`.
+        lines = release.status_lines(status=self.status, channel_status=self.channel_status)
+        self.assertEqual(lines[-1].split(None, 2), ["chocolatey", "until-accepted", "rejected: publish a new version"])
+        # Only the rejected channel ends: a due Homebrew is still finished.
+        self.states = {"homebrew": "due", "chocolatey": "rejected"}
+        waits, out = self.run_tag(run=lambda tag: self.success)
+        self.assertEqual(waits, [("release-0.2.0", [("tool", "homebrew")])])
 
     def test_status_shows_each_channel_and_its_policy(self):
         self.run_tag()
@@ -1833,6 +2040,11 @@ class WaitForChannels(unittest.TestCase):
         sleeps, out = self.wait(["due"] * 4)
         self.assertEqual(sleeps, 3)
         self.assertIn("note   homebrew of tool 1.2.0 (github) is due, not done", out)
+
+    def test_a_rejected_one_is_not_waited_for(self):
+        sleeps, out = self.wait(["rejected"] * 4)
+        self.assertEqual(sleeps, 0)
+        self.assertIn("note   homebrew of tool 1.2.0 (github) is rejected: publish a new version", out)
 
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "crates-io"
@@ -1872,13 +2084,13 @@ class CratesIoReadiness(unittest.TestCase):
         base = Path(self.dir.name) / name
         release.shutil.copytree(FIXTURES / name, base)
         if config:
-            (base / "release-kit.yml").write_text((base / config).read_text())
+            (base / "rab.yml").write_text((base / config).read_text())
         self.answers = json.loads((base / "crates-io.json").read_text())
         return base
 
     def readiness(self, base, repo="acme/ontology", **kw):
         read = release.files_on_disk(base)
-        self.assertEqual(release.check(read), [], "release-kit.yml itself is fine")
+        self.assertEqual(release.check(read), [], "rab.yml itself is fine")
         kw.setdefault("fetch", crates_io(self.answers))
         return release.crates_io_readiness(release.load(read), base, repo=repo, offline_mode=False, **kw)
 
@@ -1895,7 +2107,7 @@ class CratesIoReadiness(unittest.TestCase):
             "onto-core: crates/onto-core/Cargo.toml publishes only to internal (`publish = [...]`); "
             "add \"crates-io\" to the list, or remove `publish`",
             "onto: crates/onto/Cargo.toml says `publish = false`, so cargo will not publish it; remove that line "
-            "(or take the package out of release-kit.yml to keep the crate private)"])
+            "(or take the package out of rab.yml to keep the crate private)"])
 
     def test_a_git_dependency_without_a_version_is_refused(self):
         errors, _ = self.readiness(self.fixture("git-dependency"))
@@ -1914,8 +2126,8 @@ class CratesIoReadiness(unittest.TestCase):
         errors, warnings = self.readiness(base)
         self.assertEqual(errors, [
             "onto-ods: depends on ods-erd ^0.3, which is not on crates.io; publish ods-erd first (from its own "
-            "repository), or list it in release-kit.yml (registry: crates.io) before onto-ods"])
-        self.assertIn("library crates release-kit.yml does not publish: ods-erd.", warnings[0])
+            "repository), or list it in rab.yml (registry: crates.io) before onto-ods"])
+        self.assertIn("library crates rab.yml does not publish: ods-erd.", warnings[0])
         self.answers["index"] = {"ods-erd": ["0.2.0", "0.4.0"]}
         errors, _ = self.readiness(base)
         self.assertIn("onto-ods: depends on ods-erd ^0.3, but crates.io has no matching version (newest: 0.4.0)",
@@ -1924,8 +2136,8 @@ class CratesIoReadiness(unittest.TestCase):
         self.assertEqual(self.readiness(base)[0], [])
         # Or this release publishes it first.
         self.answers["index"] = {}
-        config = (base / "release-kit.yml").read_text()
-        (base / "release-kit.yml").write_text(config.replace("packages:\n", "packages:\n  - name: ods-erd\n"
+        config = (base / "rab.yml").read_text()
+        (base / "rab.yml").write_text(config.replace("packages:\n", "packages:\n  - name: ods-erd\n"
                                               "    registry: crates.io\n    manifest: crates/ods-erd/Cargo.toml\n"
                                               "    version: \"0.3.0\"\n"))
         self.assertEqual(self.readiness(base), ([], []))
@@ -1945,7 +2157,7 @@ class CratesIoReadiness(unittest.TestCase):
 
     def test_library_crates_published_nowhere_are_a_warning(self):
         self.assertEqual(self.readiness(self.fixture("undeclared")), ([], [
-            "library crates release-kit.yml does not publish: onto-core (publish = false), onto-ods. To publish "
+            "library crates rab.yml does not publish: onto-core (publish = false), onto-ods. To publish "
             "one, list it with registry: crates.io; a crate meant to stay private needs nothing"]))
 
     def test_open_data_suite_ontology_before_its_48_is_refused_at_check(self):
@@ -1955,7 +2167,7 @@ class CratesIoReadiness(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertIn("does not publish: onto-core (publish = false), onto-ods (publish = false)", warnings[0])
         # With its crates declared for crates.io, every blocker #48 fixed by hand.
-        errors = "\n".join(self.readiness(self.fixture("ods-before-48", "release-kit.crates-io.yml"),
+        errors = "\n".join(self.readiness(self.fixture("ods-before-48", "rab.crates-io.yml"),
                                           repo=repo)[0])
         for problem in ["onto-core: crates/onto-core/Cargo.toml says `publish = false`",
                         "onto-ods: depends on ods-erd from git",

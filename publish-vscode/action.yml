@@ -1,7 +1,7 @@
-name: publish to the VS Code Marketplace
+name: "rab: publish to the VS Code Marketplace"
 description: >-
   Publish each selected extension's packaged .vsix (named <name>-<version>.vsix)
-  to the Visual Studio Marketplace, and to Open VSX when release-kit.yml says
+  to the Visual Studio Marketplace, and to Open VSX when rab.yml says
   `open-vsx: true` (which needs a token); then wait until each serves the
   version. A registry that already has the version is skipped, so a re-run
   uploads only what is missing.
@@ -57,8 +57,8 @@ runs:
           if [ "$openvsx" = true ]; then
             npx --yes ovsx publish "$file"
           elif [ "$declared" != true ] && [ "$marketplace" = true ] && [ -n "$OVSX_PAT" ]; then
-            # Not declared in release-kit.yml: uploaded as before, but not checked.
-            echo "::warning::$id: uploading to Open VSX unchecked; add open-vsx: true to its release-kit.yml entry so release-kit verifies it and a re-run finishes it"
+            # Not declared in rab.yml: uploaded as before, but not checked.
+            echo "::warning::$id: uploading to Open VSX unchecked; add open-vsx: true to its rab.yml entry so rab verifies it and a re-run finishes it"
             npx --yes ovsx publish "$file"
           fi
         done

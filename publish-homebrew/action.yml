@@ -1,4 +1,4 @@
-name: publish to a Homebrew tap
+name: "rab: publish to a Homebrew tap"
 description: >-
   For each selected github package with `homebrew`: render its formula from
   its template and the published release's checksums, attest it (with

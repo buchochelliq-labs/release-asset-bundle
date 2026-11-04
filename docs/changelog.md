@@ -1,42 +1,77 @@
 # Versions and changelog
 
-## How release-kit is versioned
+## How rab is versioned
 
-release-kit is tagged `v1.x.y`:
+rab (release-kit until 1.7.0) is tagged `vX.Y.Z`:
 
-- a **patch** (`v1.2.3` → `v1.2.4`) fixes a bug;
-- a **minor** (`v1.2.x` → `v1.3.0`) adds something that existing
-  `release-kit.yml` files and `release.yml` workflows keep working with;
-- a **major** (`v2.0.0`) needs repositories to change their configuration or
+- a **patch** (`v2.0.0` → `v2.0.1`) fixes a bug;
+- a **minor** (`v2.0.x` → `v2.1.0`) adds something that existing
+  `rab.yml` files and `release.yml` workflows keep working with;
+- a **major** (`v3.0.0`) needs repositories to change their configuration or
   workflow. Each repository moves when it installs the new version.
 
-An installed copy records where it came from in
-`.github/release-kit/manifest.json`:
+`release.py --version` prints the version of the script (`rab 2.0.0`). An
+installed copy records where it came from in `.github/rab/manifest.json`:
 
 ```json
 {
-  "source": "buchochelliq-labs/release-kit",
-  "version": "v1.1.0-1-g874e21c",
+  "source": "buchochelliq-labs/release-asset-bundle",
+  "version": "v2.0.0",
   "commit": "874e21cbe8bdf07c9f1a613e116fbd7542950b41",
   "files": {
-    ".github/release-kit/scripts/release.py": "<sha256>",
+    ".github/rab/scripts/release.py": "<sha256>",
     "...": "..."
   }
 }
 ```
 
-`version` is `git describe --tags --always --dirty` of the release-kit
-checkout it was installed from: `v1.1.0` from a tag, `v1.1.0-1-g874e21c` from
-a commit after it, and one from a checkout with local edits ends in
-`-dirty`. `files` maps every installed file to its SHA-256; `release.py
-vendored` compares against it.
+`version` is `git describe --tags --always --dirty` of the checkout it was
+installed from: `v2.0.0` from a tag, `v2.0.0-1-g874e21c` from a commit after
+it, and one from a checkout with local edits ends in `-dirty`. `files` maps
+every installed file to its SHA-256; `release.py vendored` compares against
+it, and prints the version (`rab v2.0.0: the installed copy is unmodified.`).
 
-To move a repository to a new version: pull release-kit, check out the tag you
-want, run `install`, and open a PR.
+To move a repository to a new version: pull the kit, check out the tag you
+want, run `install`, and open a PR. From release-kit 1.x, see
+[Migrating from release-kit 1.x](migrating-to-rab.md).
 
 ## Changelog
 
-### Unreleased
+### v2.0.0
+
+**release-kit is now rab, the Release Asset Bundle** (BAB, after its
+[mascot](mascot.md)), at
+[`buchochelliq-labs/release-asset-bundle`](https://github.com/buchochelliq-labs/release-asset-bundle).
+This major version renames what repositories keep on disk, and gathers
+everything since 1.7.0: Open VSX checked like the Marketplace, a
+machine-readable release record, a retry policy per channel with `tag`
+finishing Homebrew and Chocolatey, crates.io pre-checks in `check`, release
+builds from a record tag with no caches, and a rejected Chocolatey version as
+a terminal state. **Repositories must copy template changes into their
+`release.yml`**: see [Migrating from release-kit 1.x](migrating-to-rab.md).
+
+**The rename.** The configuration is `rab.yml` (was `rab.yml`), the
+installed copy is `.github/rab/` (was `.github/release-kit/`), the build
+workflow is `.github/workflows/rab-build.yml` (was `release-kit-build.yml`),
+and `RAB_OFFLINE` replaces `RELEASE_KIT_OFFLINE`. The script keeps its name:
+`python3 .github/rab/scripts/release.py`. `install` writes the new names and
+migrates a 1.x layout: it moves `rab.yml` to `rab.yml` (`git mv` when
+tracked), removes the old copy and build workflow, rewrites the old paths in
+the repository's workflows, and prints each change. Until rab 3.0.0 the old
+names still work with a warning: every command reads `rab.yml`, else
+`rab.yml` (and refuses when both exist), `vendored` accepts a copy at
+`.github/release-kit/`, and `RELEASE_KIT_OFFLINE` is read when `RAB_OFFLINE`
+is unset. The actions are named `rab: …`, the build workflow `rab build`, and
+`release.py --version` prints the version. The release record's schema keeps
+`schema_version: 1`; its `$id` moves to the new site.
+
+**A rejected Chocolatey version is terminal.** The community repository keeps
+a rejected version and refuses every push of it, while a version still in
+moderation can be pushed again. So `rejected` is now neither done nor due:
+the gate does not select it, `tag` does not retry or wait for it and notes
+`chocolatey of <package> is rejected: publish a new version; not retried`,
+and `status` shows `rejected: publish a new version`. Fix the package and
+release a new version. See [the retry policy](recovery.md#what-each-channel-allows-again-the-retry-policy).
 
 **Open VSX is checked like the Marketplace.** A `vscode` package takes
 `open-vsx: true`: Open VSX is then part of its publication. The version is
@@ -68,7 +103,7 @@ does not change an existing one. Copy it from `templates/release.yml`. See
 [The release record](release-record.md).
 
 **Retry policy per channel; `tag` finishes Homebrew and Chocolatey.** Each
-channel has a retry policy defined by release-kit: `once` for crates.io, PyPI,
+channel has a retry policy defined by rab: `once` for crates.io, PyPI,
 npm and the VS Code Marketplace, `finish` for GitHub Releases, `idempotent`
 for a Homebrew tap and `until-accepted` for Chocolatey. The derived channels
 now have a state, read live: Homebrew is done when the tap's default branch
@@ -97,8 +132,8 @@ dependency that publishing would take from crates.io when crates.io has no
 matching version (unless this release publishes it first), a name someone else
 owns (from the public owners API), a failing `cargo package --list`, and
 `include_str!`-style embeds the package does not carry. Each message names the
-fix. It warns about library crates in the workspace that `release-kit.yml`
-publishes nowhere. `check --offline` (or `RELEASE_KIT_OFFLINE=1`) skips the
+fix. It warns about library crates in the workspace that `rab.yml`
+publishes nowhere. `check --offline` (or `RAB_OFFLINE=1`) skips the
 questions to crates.io; `check --publish-dry-run` runs
 `cargo publish --dry-run` over the crates, for CI. `preflight --registry
 crates.io` runs the same checks on the selected crates. New page:
@@ -123,6 +158,11 @@ away. Install the new version; `release.yml` needs no change, except to add
 `package-manager-cache: false` to the `setup-node` steps of an installed
 `publish-npm` or `publish-vscode` job. See
 [No caches](workflow.md#no-caches).
+
+### v1.2.0 to v1.7.0
+
+These shipped across v1.2.0 to v1.7.0 and are recorded together, with
+release-kit's names (`release-kit.yml`, `.github/release-kit/`).
 
 **Promote reviewed CI artifacts.** A new artifact kind, `ci-artifact`,
 publishes the files of a pinned GitHub Actions artifact unchanged instead of

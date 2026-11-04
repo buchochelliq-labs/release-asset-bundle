@@ -1,4 +1,4 @@
-name: publish to Chocolatey
+name: "rab: publish to Chocolatey"
 description: >-
   For each selected github package with `chocolatey` (on a Windows runner):
   render its package from its templates and the published release's

@@ -1,4 +1,4 @@
-name: release build
+name: "rab: release build"
 description: >-
   Build one planned job (a matrix entry of the plan) into dist/, with a
   .sha256 beside every file for GitHub Releases. Sets up what the kind needs:

@@ -1,6 +1,7 @@
-"""The buchochelliq-labs release driver: release-kit.yml, checked, built, tagged and gated.
+"""rab (Release Asset Bundle, formerly release-kit), the buchochelliq-labs release
+driver: rab.yml, checked, built, tagged and gated.
 
-release-kit.yml lists every package a repository publishes, on which registry,
+rab.yml lists every package a repository publishes, on which registry,
 from which manifest, at which version, in publication order, and the
 artifacts each one is built into. A release is cut from one commit of the
 default branch and named by one package's version (the last, unless
@@ -22,12 +23,12 @@ release_cohort.py; the rules are the same:
     the community repository.
 
 Commands (person):
-    check       release-kit.yml matches every manifest, names no package twice,
+    check       rab.yml matches every manifest, names no package twice,
                 lists each package after the listed packages it depends on,
                 and declares artifacts each registry can publish; and no
                 crates.io package has what `cargo publish` would refuse.
                 --offline, --publish-dry-run.
-    sync        rewrite release-kit.yml's versions from the manifests.
+    sync        rewrite rab.yml's versions from the manifests.
     status      each package: version, tag, and whether it is published.
     tag         tag the release and wait for it: an annotated record tag per
                 package due (which starts nothing), then the release tag,
@@ -52,7 +53,7 @@ Commands (the gate action, in CI):
                 build one planned job into dist/, with a .sha256 per file for
                 GitHub Releases.
     github-release --name NAME --stage DIR --notes-out FILE
-                shape a github package's release as release-kit.yml says:
+                shape a github package's release as rab.yml says:
                 write its `checksums` file into DIR, its `notes` into FILE,
                 and print what the publish action should do (JSON).
 
@@ -71,17 +72,22 @@ Commands (the gate action, in CI):
                 registry URL. The workflow's last job writes it, always.
 
 Commands (installing):
-    install     from a release-kit checkout, copy the kit into the repository
-                you are in: .github/release-kit/ (this script and the actions)
-                and .github/workflows/release-kit-build.yml, with a manifest of
-                checksums; and a starter release.yml if it has none.
+    install     from a rab checkout, copy the kit into the repository you
+                are in: .github/rab/ (this script and the actions) and
+                .github/workflows/rab-build.yml, with a manifest of checksums;
+                and a starter release.yml if it has none. A repository with
+                the release-kit 1.x layout is migrated to the new names.
     vendored    the installed copy is unmodified (run it in CI): it changes
                 only by installing again.
 
 Registries: github (GitHub Releases), crates.io, pypi, npm, vscode (Visual
 Studio Marketplace, and Open VSX with `open-vsx: true`). Artifact kinds:
-rust-binary, python, maturin, vsix, ci-artifact and command. Requires Python 3.11+, git and PyYAML (for release-kit.yml); `tag`
+rust-binary, python, maturin, vsix, ci-artifact and command. Requires Python 3.11+, git and PyYAML (for rab.yml); `tag`
 follows runs with the GitHub CLI (`gh`) when it is installed.
+
+Names from release-kit 1.x still work until rab 3.0.0, each with a warning:
+the config release-kit.yml (when there is no rab.yml), an installed copy at
+.github/release-kit/, and RELEASE_KIT_OFFLINE.
 """
 
 import sys
@@ -111,14 +117,17 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-CONFIG = "release-kit.yml"
+VERSION = "2.0.0"
+CONFIG = "rab.yml"
+# release-kit 1.x's name for it: still read, with a warning, until rab 3.0.0.
+OLD_CONFIG = "release-kit.yml"
 REGISTRIES = ("github", "crates.io", "pypi", "npm", "vscode")
 NUMBER = r"(?:0|[1-9][0-9]*)"
 PRERELEASE = rf"(?:{NUMBER}|[0-9]*[A-Za-z-][0-9A-Za-z-]*)"
 SEMVER = rf"{NUMBER}\.{NUMBER}\.{NUMBER}(?:-{PRERELEASE}(?:\.{PRERELEASE})*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?"
 # PyPI versions follow PEP 440 (1.2.0rc1, 1.2.0.post1), not SemVer.
 PEP440 = r"[0-9]+(?:\.[0-9]+)*(?:(?:a|b|rc)[0-9]+)?(?:\.post[0-9]+)?(?:\.dev[0-9]+)?"
-USER_AGENT = "buchochelliq-labs-release-kit (https://github.com/buchochelliq-labs/release-kit)"
+USER_AGENT = f"buchochelliq-labs-rab/{VERSION} (https://github.com/buchochelliq-labs/release-asset-bundle)"
 
 
 def root():
@@ -141,7 +150,57 @@ def files_at(commit):
 
 
 # ---------------------------------------------------------------------------
-# release-kit.yml
+# rab.yml (release-kit.yml in release-kit 1.x)
+
+_warned = set()
+
+
+def warn_once(message):
+    """Print a warning once per run, as a GitHub annotation in Actions."""
+    if message not in _warned:
+        _warned.add(message)
+        prefix = "::warning::" if os.environ.get("GITHUB_ACTIONS") == "true" else "warning: "
+        print(prefix + message, file=sys.stderr, flush=True)
+
+
+def old_config_warning():
+    return (f"{OLD_CONFIG} is release-kit 1.x's name for {CONFIG}; rename it (git mv {OLD_CONFIG} {CONFIG}, "
+            f"or install rab again, which migrates it). The old name is read until rab 3.0.0.")
+
+
+def read_config(read):
+    """(name, text) of the release configuration through `read`: rab.yml,
+    else release-kit.yml with a warning. Both present is refused: which one
+    is meant is a guess. Neither: whatever reading rab.yml raised."""
+    found, missing = {}, None
+    for name in (CONFIG, OLD_CONFIG):
+        try:
+            found[name] = read(name)
+        except (OSError, KeyError, subprocess.CalledProcessError) as error:
+            missing = missing or error
+    if len(found) == 2:
+        raise ValueError(f"both {CONFIG} and {OLD_CONFIG} exist: keep {CONFIG} (rab 2.x's name) and delete "
+                         f"{OLD_CONFIG}")
+    if OLD_CONFIG in found:
+        warn_once(old_config_warning())
+        return OLD_CONFIG, found[OLD_CONFIG]
+    if CONFIG in found:
+        return CONFIG, found[CONFIG]
+    raise missing
+
+
+def config_path(base=None):
+    """The configuration file on disk: rab.yml, else release-kit.yml (with a
+    warning, and refused when both exist); rab.yml when there is neither."""
+    base = Path(base) if base else root()
+    new, old = base / CONFIG, base / OLD_CONFIG
+    if new.is_file() and old.is_file():
+        raise ValueError(f"both {CONFIG} and {OLD_CONFIG} exist: keep {CONFIG} (rab 2.x's name) and delete "
+                         f"{OLD_CONFIG}")
+    if old.is_file() and not new.is_file():
+        warn_once(old_config_warning())
+        return old
+    return new
 
 
 @dataclass(frozen=True)
@@ -209,7 +268,7 @@ def parse_config(text):
 
 
 def load(read):
-    data = parse_config(read(CONFIG))
+    data = parse_config(read_config(read)[1])
     entries = data.get("packages") or []
     if not entries:
         raise ValueError(f"{CONFIG} lists no packages")
@@ -377,7 +436,7 @@ def manifest_info(read, package):
 
 
 def check(read):
-    """Every way release-kit.yml can disagree with the repository, as messages."""
+    """Every way rab.yml can disagree with the repository, as messages."""
     try:
         release = load(read)
     except (ValueError, tomllib.TOMLDecodeError, KeyError) as error:
@@ -424,12 +483,20 @@ def check(read):
 
 
 def sync(read=None, path=None):
-    """Rewrite each version in release-kit.yml from its manifest, keeping the
-    file's comments and layout. Returns the changes made."""
-    path = path or root() / CONFIG
+    """Rewrite each version in rab.yml (or rab.yml) from its
+    manifest, keeping the file's comments and layout. Returns the changes made."""
+    path = path or config_path()
     read = read or files_on_disk(path.parent)
     text = path.read_text(encoding="utf-8")
-    release = load(lambda name: text if name == CONFIG else read(name))
+
+    def reading(name):
+        if name in (CONFIG, OLD_CONFIG):
+            if name != path.name:
+                raise FileNotFoundError(name)
+            return text
+        return read(name)
+
+    release = load(reading)
     # One `version:` line per package, in order (artifacts carry none).
     lines = text.splitlines(keepends=True)
     found = [i for i, line in enumerate(lines) if re.match(r"^\s*(?:-\s+)?version:", line)]
@@ -521,7 +588,7 @@ def on_open_vsx(package):
 
 
 # ---------------------------------------------------------------------------
-# Artifacts: what each package is built into, declared in release-kit.yml
+# Artifacts: what each package is built into, declared in rab.yml
 
 # Rust targets and the GitHub runner that builds each. Intel macOS is
 # cross-compiled on Apple Silicon (GitHub retired the Intel runners).
@@ -729,7 +796,7 @@ def prepare(job):
 
 
 def github_release(name, stage, notes_out, read=None, runner=None, options_only=False):
-    """Shape a `github` package's release from release-kit.yml: write its
+    """Shape a `github` package's release from rab.yml: write its
     `checksums` file into `stage` (over every file there but the `.sha256`
     ones), and run its `notes` command into `notes_out`. Returns
     {"notes": bool, "attest": bool, "checksums": name or ""}; with
@@ -883,7 +950,7 @@ def update_tap(tap, formula, repo, version, release_url, open_pr=open_tap_pr):
     git_tap("push", "--quiet", "--force", "origin", f"HEAD:refs/heads/{branch}")
     url = open_pr(repo, branch, base, f"{name} {version}",
                   f"The Homebrew formula for [{name} {version}]({release_url}), rendered by its release run "
-                  "(release-kit).")
+                  "(rab, the Release Asset Bundle).")
     print(f"tap pull request for {name} {version}: {url}", flush=True)
     return url
 
@@ -891,14 +958,15 @@ def update_tap(tap, formula, repo, version, release_url, open_pr=open_tap_pr):
 # ---------------------------------------------------------------------------
 # Retry policy: which publications can be run again
 #
-# Defined by release-kit, not configured: it is what each channel allows.
+# Defined by rab, not configured: it is what each channel allows.
 #   once            a version is permanent: never uploaded again (rule 1).
 #   finish          an unfinished one (a draft GitHub release) is completed;
 #                   a published one is never touched again.
 #   idempotent      publishing again is harmless: done again until done.
 #   until-accepted  can be pushed again until the channel has accepted it
 #                   (accepted includes "in moderation": pushing again would
-#                   only replace the version under review).
+#                   only replace the version under review), or rejected it
+#                   (a rejected version can never be pushed again).
 # The registries say themselves whether a version is published (`published_on`);
 # the channels made from a GitHub release have their own state, read live
 # (`channel_state`), so `tag` and the gate can select a published package
@@ -910,8 +978,19 @@ RETRY = {"github": "finish", "crates.io": "once", "pypi": "once", "npm": "once",
 # release's branch: merging it is the tap's maintainers' step), `prerelease`
 # (prereleases are left out of the tap). Chocolatey: `listed` (approved), and
 # `submitted` (in its checks or moderation, which can take days). Anything
-# else (`due`, a `rejected` Chocolatey version) is due.
+# else (`due`) is due, except a terminal state.
 DONE = {"merged", "proposed", "prerelease", "listed", "submitted"}
+# Channel states that end the version on that channel: neither done nor due,
+# and never retried. Chocolatey's `rejected`: the community repository keeps a
+# rejected version and refuses every push of it ("Package versions that are
+# approved, rejected, or exempted cannot be modified"), so only a new version
+# can reach Chocolatey. {state: what to tell the maintainer}.
+TERMINAL = {"rejected": "rejected: publish a new version"}
+
+
+def state_text(state):
+    """A channel state as `status` and `tag` print it."""
+    return TERMINAL.get(state, state)
 
 
 def channels_of(package):
@@ -1028,23 +1107,28 @@ def chocolatey_refused(name, log, state_of=None, read=None):
     except (RuntimeError, OSError, ValueError) as error:
         print(f"{package}: cannot read its Chocolatey state ({error})", flush=True)
         state = "unknown"
-    if state == "rejected":
-        raise RuntimeError(f"{package}: Chocolatey rejected this version, and a rejected version cannot be pushed "
-                           "again; fix the package and release a new version")
+    if state in TERMINAL:
+        raise RuntimeError(f"{package}: Chocolatey {TERMINAL[state]} (a rejected version cannot be pushed "
+                           "again: fix the package and release a new version)")
     print(f"{package}: the community repository already has this version ({state}); counted as pushed",
           flush=True)
     return state
 
 
-def pending_channels(package, state_of):
+def pending_channels(package, state_of, ended=None):
     """{channel: state} of the channels made from a published `package` that
     are not done and may be run again (`idempotent` or `until-accepted`).
-    `state_of(package, channel)` reads a channel's state."""
+    `state_of(package, channel)` reads a channel's state. A channel in a
+    TERMINAL state is not pending: it goes into `ended` ({channel: state}),
+    when given."""
     pending = {}
     for channel in channels_of(package)[1:]:
         if RETRY[channel] in ("idempotent", "until-accepted"):
             state = state_of(package, channel)
-            if state not in DONE:
+            if state in TERMINAL:
+                if ended is not None:
+                    ended[channel] = state
+            elif state not in DONE:
                 pending[channel] = state
     return pending
 
@@ -1117,7 +1201,7 @@ def promote(job, out, tagged=None):
     """Copy the files of one pinned CI artifact into `out`, unchanged, after
     proving they are the reviewed bytes of this release: the archive has the
     pinned SHA-256 and has not expired, and the tagged commit is the commit
-    that built it, or a descendant that changes nothing but `release-kit.yml`
+    that built it, or a descendant that changes nothing but `rab.yml`
     (rule 4: a release is one commit's files). The pin cannot be in the commit
     the artifact was built from, so the commit that records it is allowed."""
     ident, pinned = job["artifact"], job["sha256"]
@@ -1129,7 +1213,7 @@ def promote(job, out, tagged=None):
     if meta.get("expired"):
         raise RuntimeError(f"{where} has expired; pin a newer run's artifact")
     if meta.get("digest") and meta["digest"] != f"sha256:{pinned}":
-        raise RuntimeError(f"{where}: GitHub records {meta['digest']}, release-kit.yml pins sha256:{pinned}")
+        raise RuntimeError(f"{where}: GitHub records {meta['digest']}, rab.yml pins sha256:{pinned}")
     built = (meta.get("workflow_run") or {}).get("head_sha")
     if not built:
         raise RuntimeError(f"{where}: GitHub does not say which commit built it")
@@ -1138,7 +1222,7 @@ def promote(job, out, tagged=None):
     if relation not in ("identical", "ahead"):
         raise RuntimeError(f"{where} was built from {built[:12]}, which the tagged commit does not descend from "
                            f"({relation}): a release is one commit. Pin an artifact built on this branch.")
-    if other := [name for name in changed if name != CONFIG]:
+    if other := [name for name in changed if name not in (CONFIG, OLD_CONFIG)]:
         raise RuntimeError(f"{where} was built from {built[:12]}; since then {', '.join(other[:5])}"
                            f"{' and more' if len(other) > 5 else ''} changed: a release is one commit. "
                            f"Only {CONFIG} (the pin itself) may change after the build.")
@@ -1152,7 +1236,7 @@ def promote(job, out, tagged=None):
         raise RuntimeError(f"{where}: download refused (HTTP {status})")
     if hashlib.sha256(data).hexdigest() != pinned:
         raise RuntimeError(f"{where}: the archive's SHA-256 is {hashlib.sha256(data).hexdigest()}, "
-                           f"release-kit.yml pins {pinned}")
+                           f"rab.yml pins {pinned}")
     version = pep440(job["version"]) if job["registry"] == "pypi" else job["version"]
     copied = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
@@ -1328,18 +1412,18 @@ def not_its_own(release, existing, sha, remote, packages=None):
 def foreign_error(packages, existing):
     lines = [f"  {p.tag} at {existing[p.tag][:12]}: not {p}'s record" for p in packages]
     return ("these tags already exist for something else:\n" + "\n".join(lines) + "\n"
-            "Give the package a tag format of its own in release-kit.yml (for example "
+            "Give the package a tag format of its own in rab.yml (for example "
             "`tag: \"python-v{version}\"` for a PyPI package named like a crate), or bump its version.")
 
 
 def release_at(commit, package=None):
-    """The release configured at `commit`; a commit without release-kit.yml
-    (a tag from before the repository adopted release-kit) is refused."""
+    """The release configured at `commit`; a commit without rab.yml or
+    rab.yml (a tag from before the repository adopted the kit) is refused."""
     try:
         return load(files_at(commit))
     except subprocess.CalledProcessError:
         what = f"{package.tag} is on {commit[:12]}, which" if package else f"{commit[:12]}"
-        raise RuntimeError(f"{what} has no {CONFIG}: the tag predates release-kit. Bump the package's "
+        raise RuntimeError(f"{what} has no {CONFIG} (nor {OLD_CONFIG}): the tag predates the kit. Bump the package's "
                            "version, or delete the stale tag if nothing was published from it.") from None
 
 
@@ -1426,9 +1510,11 @@ def gate(tag_name, remote="origin", status=published_on, output=None, verify_onl
             due.append(package)
             channels[package] = channels_of(package)
             continue
-        pending = {}
+        pending, ended = {}, {}
         if existing.get(package.tag) == sha:
-            pending = pending_channels(package, lambda p, c: channel_status(p, c, sha))
+            pending = pending_channels(package, lambda p, c: channel_status(p, c, sha), ended)
+        for channel, state in ended.items():
+            print(f"{package}: {channel} is {TERMINAL[state]}; not selected for it", flush=True)
         if pending:
             print(f"{package}: already published; selected for "
                   + ", ".join(f"{c} ({state})" for c, state in pending.items()), flush=True)
@@ -1712,7 +1798,7 @@ def consume(registry, selection, runner=None, read=None, tries=10, sleep=time.sl
                 sleep(30)
 
     for package in chosen:
-        with tempfile.TemporaryDirectory(prefix="release-kit-consume-") as scratch:
+        with tempfile.TemporaryDirectory(prefix="rab-consume-") as scratch:
             here = Path(scratch)
             if registry == "crates.io" and has_binary(package.manifest, read):
                 attempt(lambda: runner(["cargo", "install", package.name, "--version", f"={package.version}",
@@ -1757,8 +1843,8 @@ PUBLISH_JOBS = {"github": "publish-github", "crates.io": "publish-crates", "pypi
 CHANNEL_JOBS = {"homebrew": "publish-homebrew", "chocolatey": "publish-chocolatey"}
 RECORD_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "$id": "https://buchochelliq-labs.github.io/release-kit/release-record.schema.json",
-    "title": "release-kit release record",
+    "$id": "https://buchochelliq-labs.github.io/release-asset-bundle/release-record.schema.json",
+    "title": "rab release record",
     "description": "What one release run set out to publish, and what came of it.",
     "type": "object",
     "required": ["schema_version", "repository", "release", "tag", "commit", "verify_only", "run",
@@ -1767,7 +1853,7 @@ RECORD_SCHEMA = {
         "schema_version": {"const": RECORD_VERSION},
         "repository": {"type": "string", "description": "owner/name"},
         "release": {"type": ["string", "null"],
-                    "description": "the release's name; null if release-kit.yml could not be read"},
+                    "description": "the release's name; null if rab.yml could not be read"},
         "tag": {"type": "string", "description": "the release tag the run was for"},
         "commit": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$",
                    "description": "the tagged commit; null if the tag could not be resolved"},
@@ -1790,7 +1876,7 @@ RECORD_SCHEMA = {
                  "additionalProperties": {"enum": list(JOB_RESULTS)}},
         "packages": {
             "type": "array",
-            "description": "every package of release-kit.yml at the tagged commit, in its order",
+            "description": "every package of rab.yml at the tagged commit, in its order",
             "items": {
                 "type": "object",
                 "required": ["name", "registry", "version", "tag", "selected", "outcome", "job", "url",
@@ -1923,7 +2009,7 @@ def run_info(repo):
 def record(tag_name, sha, selection, verify_only, needs, dist="dist", read=None, status=published_on,
            repo=None, run=None):
     """The release record of one run (RECORD_SCHEMA): the release, its commit,
-    the run, its jobs' results, and every package of release-kit.yml with
+    the run, its jobs' results, and every package of rab.yml with
     what came of it. The release workflow's last job writes it whatever
     happened before, so a coordinator can tell a run that published nothing
     from one that published part of the release. `needs` is that job's
@@ -2033,7 +2119,8 @@ def record_lines(document):
 # Manifests are read with `cargo metadata`, so workspace inheritance and
 # renamed dependencies mean what cargo says they mean.
 
-OFFLINE = "RELEASE_KIT_OFFLINE"
+OFFLINE = "RAB_OFFLINE"
+OLD_OFFLINE = "RELEASE_KIT_OFFLINE"  # release-kit 1.x's name: still read, with a warning
 LIBRARY_KINDS = {"lib", "rlib", "dylib", "proc-macro"}
 # include_str!("..."), include_bytes!("...") and include!("..."), relative to
 # the file, or concat!(env!("CARGO_MANIFEST_DIR"), "/..."), relative to the crate.
@@ -2046,8 +2133,13 @@ TEST_ITEM = re.compile(r"#\[\s*(?:test\s*\]|cfg\s*\(\s*(?:all\s*\(\s*)?test\b)")
 
 
 def offline():
-    """Whether checks that ask crates.io are skipped (RELEASE_KIT_OFFLINE=1)."""
-    return os.environ.get(OFFLINE, "").strip().lower() in {"1", "true", "yes"}
+    """Whether checks that ask crates.io are skipped (RAB_OFFLINE=1; release-kit
+    1.x's RELEASE_KIT_OFFLINE is read too, with a warning, when RAB_OFFLINE is unset)."""
+    value = os.environ.get(OFFLINE)
+    if value is None and (value := os.environ.get(OLD_OFFLINE)) is not None:
+        warn_once(f"{OLD_OFFLINE} is release-kit 1.x's name: set {OFFLINE} instead (the old name is read "
+                  "until rab 3.0.0)")
+    return (value or "").strip().lower() in {"1", "true", "yes"}
 
 
 _last_api_call = [0.0]
@@ -2205,7 +2297,7 @@ def owner_problem(name, repo, fetch):
                          f"github:{owner}:<team> for an organisation)")
     return "warning", (f"{name}: crates.io's {name} is owned by {logins}"
                        + (f" (repository {crate['repository']})" if crate.get("repository") else "")
-                       + f"; release-kit cannot tell whether {repo or 'this repository'} may publish it. Make sure "
+                       + f"; rab cannot tell whether {repo or 'this repository'} may publish it. Make sure "
                        "its Trusted Publisher names this repository, or that the token's account is an owner")
 
 
@@ -2260,7 +2352,7 @@ def embed_problems(name, crate_dir, packaged):
 
 def _workspaces(release, base, cargo, offline_mode):
     """{manifest path (resolved): (metadata package, workspace metadata)}
-    for every Cargo.toml release-kit.yml names, plus the root workspace's
+    for every Cargo.toml rab.yml names, plus the root workspace's
     members; and the error each unreadable manifest gave."""
     found, errors, seen = {}, {}, set()
     manifests = [p.manifest for p in release.packages if PurePosixPath(p.manifest).name == "Cargo.toml"]
@@ -2285,7 +2377,7 @@ def _workspaces(release, base, cargo, offline_mode):
 
 
 def declared_crates(release, base, found):
-    """The crates release-kit.yml publishes in some form: crates.io packages,
+    """The crates rab.yml publishes in some form: crates.io packages,
     any package whose manifest is a crate's, the crates maturin builds and
     the crates a rust-binary names."""
     names = {p.name for p in release.packages if p.registry == "crates.io"}
@@ -2304,7 +2396,7 @@ def declared_crates(release, base, found):
 
 
 def crates_io_readiness(release, base, only=None, fetch=None, cargo=None, repo=None, offline_mode=None):
-    """What would stop `cargo publish` for release-kit.yml's crates.io
+    """What would stop `cargo publish` for rab.yml's crates.io
     packages (or the ones named in `only`), as (errors, warnings):
 
     - the manifest says `publish = false`, or lists only other registries;
@@ -2319,8 +2411,8 @@ def crates_io_readiness(release, base, only=None, fetch=None, cargo=None, repo=N
       package does not carry.
 
     With every package (no `only`), it also warns about the workspace's
-    library crates release-kit.yml does not publish. Checks that ask
-    crates.io are skipped offline (RELEASE_KIT_OFFLINE=1)."""
+    library crates rab.yml does not publish. Checks that ask
+    crates.io are skipped offline (RAB_OFFLINE=1)."""
     offline_mode = offline() if offline_mode is None else offline_mode
     fetch = fetch or polite_fetch
     if cargo is None:
@@ -2457,26 +2549,33 @@ def publish_dry_run(release, base, runner=None):
 # repository's release changes only when it installs a newer kit.
 
 KIT = Path(__file__).resolve().parent.parent
-VENDOR = ".github/release-kit"
-BUILD_WORKFLOW = ".github/workflows/release-kit-build.yml"
+VENDOR = ".github/rab"
+BUILD_WORKFLOW = ".github/workflows/rab-build.yml"
 MANIFEST = f"{VENDOR}/manifest.json"
-NOTICE = """# release-kit (installed copy)
+# release-kit 1.x's layout: `vendored` still accepts a copy there, with a
+# warning, and `install` migrates it (until rab 3.0.0).
+OLD_VENDOR = ".github/release-kit"
+OLD_BUILD_WORKFLOW = ".github/workflows/release-kit-build.yml"
+OLD_MANIFEST = f"{OLD_VENDOR}/manifest.json"
+# What `install` rewrites in the repository's own workflows when it migrates.
+OLD_PATHS = ((f"{OLD_VENDOR}/", f"{VENDOR}/"), ("release-kit-build.yml", "rab-build.yml"))
+NOTICE = """# rab, the Release Asset Bundle (installed copy)
 
-Installed from buchochelliq-labs/release-kit {version} ({commit}) by
+Installed from buchochelliq-labs/release-asset-bundle {version} ({commit}) by
 `release.py install`. Do not edit these files: CI checks them against
-manifest.json (`python3 .github/release-kit/scripts/release.py vendored`).
-To update, install again from a newer release-kit checkout:
+manifest.json (`python3 .github/rab/scripts/release.py vendored`).
+To update, install again from a newer checkout of the kit:
 
-    python3 ../release-kit/scripts/release.py install
+    python3 ../release-asset-bundle/scripts/release.py install
 
-This repository's release is configured in release-kit.yml at its root.
+This repository's release is configured in rab.yml at its root.
 """
 
 
 def kit_files(kit=KIT):
     """{path in the repository: source file} for an install."""
     files = {f"{VENDOR}/scripts/release.py": kit / "scripts" / "release.py",
-             BUILD_WORKFLOW: kit / "workflows" / "release-kit-build.yml"}
+             BUILD_WORKFLOW: kit / "workflows" / "rab-build.yml"}
     for action in sorted(kit.glob("*/action.yml")):
         files[f"{VENDOR}/{action.parent.name}/action.yml"] = action
     return files
@@ -2486,18 +2585,62 @@ def digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
+def migrate(target):
+    """Move a repository from release-kit 1.x's names to rab's: release-kit.yml
+    becomes rab.yml (`git mv` when git tracks it), the old installed copy and
+    build workflow are removed, and the old paths in the repository's own
+    workflows are rewritten. Refuses, changing nothing, when both config names
+    exist. Returns what it changed, as lines to print."""
+    target = Path(target)
+    new, old = target / CONFIG, target / OLD_CONFIG
+    if new.is_file() and old.is_file():
+        raise RuntimeError(f"both {CONFIG} and {OLD_CONFIG} exist in {target}: keep {CONFIG}, delete "
+                           f"{OLD_CONFIG}, and install again")
+    changes = []
+    if old.is_file():
+        tracked = subprocess.run(["git", "ls-files", "--error-unmatch", OLD_CONFIG], cwd=target,
+                                 capture_output=True, text=True).returncode == 0
+        if tracked:
+            subprocess.run(["git", "mv", OLD_CONFIG, CONFIG], cwd=target, check=True, capture_output=True)
+        else:
+            old.rename(new)
+        changes.append(f"renamed {OLD_CONFIG} -> {CONFIG}{' (git mv)' if tracked else ''}")
+    if (target / OLD_VENDOR).is_dir():
+        shutil.rmtree(target / OLD_VENDOR)
+        changes.append(f"removed {OLD_VENDOR}/ (replaced by {VENDOR}/)")
+    if (target / OLD_BUILD_WORKFLOW).is_file():
+        (target / OLD_BUILD_WORKFLOW).unlink()
+        changes.append(f"removed {OLD_BUILD_WORKFLOW} (replaced by {BUILD_WORKFLOW})")
+    workflows = target / ".github" / "workflows"
+    for workflow in sorted(workflows.glob("*.y*ml")) if workflows.is_dir() else ():
+        if workflow.name == PurePosixPath(BUILD_WORKFLOW).name:
+            continue
+        text = workflow.read_text(encoding="utf-8")
+        rewritten, count = text, 0
+        for before, after in OLD_PATHS:
+            count += rewritten.count(before)
+            rewritten = rewritten.replace(before, after)
+        if count:
+            workflow.write_text(rewritten, encoding="utf-8")
+            changes.append(f"rewrote {count} old path{'s' if count > 1 else ''} in "
+                           f"{workflow.relative_to(target).as_posix()} ({OLD_VENDOR}/ -> {VENDOR}/, "
+                           "release-kit-build.yml -> rab-build.yml)")
+    return changes
+
+
 def install(target=None, kit=KIT):
     """Copy the kit into the repository at `target` (default: the one you are
-    in). Returns the paths written."""
-    if not (kit / "workflows" / "release-kit-build.yml").exists():
-        raise RuntimeError("install runs from a release-kit checkout, not from an installed copy: "
-                           "git clone https://github.com/buchochelliq-labs/release-kit")
+    in), migrating a release-kit 1.x layout first. Returns the paths written."""
+    if not (kit / "workflows" / "rab-build.yml").exists():
+        raise RuntimeError("install runs from a checkout of the kit, not from an installed copy: "
+                           "git clone https://github.com/buchochelliq-labs/release-asset-bundle")
     target = Path(target) if target else root()
     if target.resolve() == kit.resolve():
-        raise RuntimeError("run install from the repository to install into, not from release-kit itself")
+        raise RuntimeError("run install from the repository to install into, not from the kit itself")
     version = subprocess.run(["git", "describe", "--tags", "--always", "--dirty"], cwd=kit, text=True,
-                             capture_output=True).stdout.strip() or "unversioned"
+                             capture_output=True).stdout.strip() or f"v{VERSION}"
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=kit, text=True, capture_output=True).stdout.strip()
+    migrated = migrate(target)
     vendor = target / VENDOR
     if vendor.exists():
         shutil.rmtree(vendor)  # a clean copy: files the new version dropped go too
@@ -2508,7 +2651,7 @@ def install(target=None, kit=KIT):
         shutil.copy2(source, destination)
         written.append(path)
     (vendor / "README.md").write_text(NOTICE.format(version=version, commit=commit[:12]), encoding="utf-8")
-    manifest = {"source": "buchochelliq-labs/release-kit", "version": version, "commit": commit,
+    manifest = {"source": "buchochelliq-labs/release-asset-bundle", "version": version, "commit": commit,
                 "files": {path: digest(target / path) for path in sorted(written)}}
     (target / MANIFEST).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     written += [f"{VENDOR}/README.md", MANIFEST]
@@ -2516,31 +2659,46 @@ def install(target=None, kit=KIT):
     if not starter.exists():
         shutil.copy2(kit / "templates" / "release.yml", starter)
         written.append(".github/workflows/release.yml")
-    print(f"installed release-kit {version} into {target}:", flush=True)
+    if migrated:
+        print(f"migrated {target} from release-kit 1.x:", flush=True)
+        for line in migrated:
+            print(f"  {line}", flush=True)
+    print(f"installed rab {version} into {target}:", flush=True)
     for path in written:
         print(f"  {path}", flush=True)
+    if migrated:
+        print("Review the changes (git status, git diff) and commit them together.", flush=True)
     return written
 
 
 def vendored(target=None):
-    """Problems with the installed copy: files edited, missing, or added."""
+    """Problems with the installed copy: files edited, missing, or added. A
+    copy at release-kit 1.x's .github/release-kit/ is checked too, with a
+    warning, when there is none at .github/rab/."""
     target = Path(target) if target else root()
+    manifest_path, vendor = MANIFEST, VENDOR
+    if not (target / MANIFEST).exists() and (target / OLD_MANIFEST).exists():
+        manifest_path, vendor = OLD_MANIFEST, OLD_VENDOR
+        warn_once(f"the installed copy is at {OLD_VENDOR}/, release-kit 1.x's path; install rab again to "
+                  f"move it to {VENDOR}/ (the old path is accepted until rab 3.0.0)")
     try:
-        manifest = json.loads((target / MANIFEST).read_text(encoding="utf-8"))
+        manifest = json.loads((target / manifest_path).read_text(encoding="utf-8"))
     except FileNotFoundError:
-        return [f"{MANIFEST} is missing: install release-kit (release.py install)"]
+        return [f"{MANIFEST} is missing: install rab (release.py install)"]
     problems = []
+    if vendor == VENDOR and (target / OLD_VENDOR).exists():
+        problems.append(f"{OLD_VENDOR}/ is left from release-kit 1.x: delete it (install migrates it)")
     for path, expected in manifest["files"].items():
         file = target / path
         if not file.exists():
             problems.append(f"{path} is missing")
         elif digest(file) != expected:
-            problems.append(f"{path} was edited; release-kit's files change only by installing again")
-    known = set(manifest["files"]) | {MANIFEST, f"{VENDOR}/README.md"}
-    for file in sorted((target / VENDOR).rglob("*")):
+            problems.append(f"{path} was edited; the kit's files change only by installing again")
+    known = set(manifest["files"]) | {manifest_path, f"{vendor}/README.md"}
+    for file in sorted((target / vendor).rglob("*")):
         relative = file.relative_to(target).as_posix()
         if file.is_file() and relative not in known and "__pycache__" not in relative:
-            problems.append(f"{relative} is not part of release-kit {manifest['version']}")
+            problems.append(f"{relative} is not part of the kit {manifest['version']}")
     return problems
 
 
@@ -2556,7 +2714,7 @@ def releases_tagged(existing, release_tag_pattern):
             try:
                 found[commit] = load(files_at(commit))
             except (subprocess.CalledProcessError, ValueError, tomllib.TOMLDecodeError):
-                continue  # not a release-kit release (from before adoption): not resumed
+                continue  # not a release of the kit (from before adoption): not resumed
     return found
 
 
@@ -2621,12 +2779,16 @@ def wait_for(tag_name, packages, timeout, status=published_on, run=run_of, sleep
                                "publishes only what is still due.")
         if not missing and (latest is None or latest["status"] == "completed"):
             unfinished = [(p, c, state) for p, c in channels if (state := channel_status(p, c)) not in DONE]
-            if unfinished and settle > 0 and time.monotonic() <= deadline:
+            # A terminal state will not change by waiting.
+            if any(s not in TERMINAL for _, _, s in unfinished) and settle > 0 and time.monotonic() <= deadline:
                 settle -= 1
                 sleep(30)
                 continue
             print(f"{tag_name}: published " + ", ".join(str(p) for p in packages), flush=True)
             for package, channel, state in unfinished:
+                if state in TERMINAL:
+                    print(f"note   {channel} of {package} is {TERMINAL[state]}", flush=True)
+                    continue
                 print(f"note   {channel} of {package} is {state}, not done: see the run's publish-{channel} job. "
                       "Fix the cause (a missing token or a rejected package), then run `release.py tag` again "
                       f"to finish it.", flush=True)
@@ -2689,9 +2851,11 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
         if status(package):
             # Its upload is done; the channels made from it may not be. They
             # are finished from the commit it was released from.
-            pending = {}
+            pending, ended = {}, {}
             if existing.get(package.tag) == sha:
-                pending = pending_channels(package, lambda p, c: channel_status(p, c, sha))
+                pending = pending_channels(package, lambda p, c: channel_status(p, c, sha), ended)
+            for channel, state in ended.items():
+                print(f"note   {channel} of {package} is {TERMINAL[state]}; not retried", flush=True)
             if not pending:
                 print(f"skip   {package.tag}: {package} is already published", flush=True)
                 continue
@@ -2791,12 +2955,13 @@ def status_lines(read=None, status=published_on, remote="origin", channel_status
         # The channels made from its release: due until it is out, then read live.
         for channel in channels_of(package)[1:]:
             state = channel_status(package, channel, tagged) if published else "due"
-            lines.append(f"    {channel:<46} {RETRY[channel]:<49} {state}")
+            lines.append(f"    {channel:<46} {RETRY[channel]:<49} {state_text(state)}")
     return lines
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser = argparse.ArgumentParser(prog="release.py", description=__doc__.split("\n\n")[0])
+    parser.add_argument("--version", action="version", version=f"rab {VERSION}")
     commands = parser.add_subparsers(dest="command", required=True)
     checker = commands.add_parser("check")
     checker.add_argument("--offline", action="store_true",
@@ -2825,7 +2990,7 @@ def main(argv=None):
     shaper.add_argument("--name", required=True)
     shaper.add_argument("--stage", required=True, help="the directory holding the release's files")
     shaper.add_argument("--notes-out", required=True, help="where to write the notes, if the package has some")
-    shaper.add_argument("--options-only", action="store_true", help="only print what release-kit.yml says")
+    shaper.add_argument("--options-only", action="store_true", help="only print what rab.yml says")
     renderer = commands.add_parser("render")
     renderer.add_argument("--name", required=True)
     renderer.add_argument("--channel", required=True, choices=sorted(CHANNEL_KEYS))
@@ -2917,8 +3082,9 @@ def main(argv=None):
             if problems := vendored():
                 print("\n".join(problems), file=sys.stderr)
                 return 1
-            manifest = json.loads((root() / MANIFEST).read_text(encoding="utf-8"))
-            print(f"release-kit {manifest['version']}: the installed copy is unmodified.")
+            where = MANIFEST if (root() / MANIFEST).exists() else OLD_MANIFEST
+            manifest = json.loads((root() / where).read_text(encoding="utf-8"))
+            print(f"rab {manifest['version']}: the installed copy is unmodified.")
         elif args.command == "preflight":
             # Only whether an Open VSX token is set; the token stays in the environment.
             preflight(args.registry, args.selection, ovsx_token=bool(os.environ.get("OVSX_PAT")),

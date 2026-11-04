@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://buchochelliq-labs.github.io/release-kit/release-record.schema.json",
-  "title": "release-kit release record",
+  "$id": "https://buchochelliq-labs.github.io/release-asset-bundle/release-record.schema.json",
+  "title": "rab release record",
   "description": "What one release run set out to publish, and what came of it.",
   "type": "object",
   "required": [
@@ -29,7 +29,7 @@
         "string",
         "null"
       ],
-      "description": "the release's name; null if release-kit.yml could not be read"
+      "description": "the release's name; null if rab.yml could not be read"
     },
     "tag": {
       "type": "string",
@@ -97,7 +97,7 @@
     },
     "packages": {
       "type": "array",
-      "description": "every package of release-kit.yml at the tagged commit, in its order",
+      "description": "every package of rab.yml at the tagged commit, in its order",
       "items": {
         "type": "object",
         "required": [

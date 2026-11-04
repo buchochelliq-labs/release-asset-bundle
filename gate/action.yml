@@ -1,4 +1,4 @@
-name: release gate
+name: "rab: release gate"
 description: >-
   Check a release tag before anything is built: annotated, on the default
   branch, recording its release and commit, not splitting its release, and
@@ -55,7 +55,7 @@ outputs:
 runs:
   using: composite
   steps:
-    # release.py reads release-kit.yml with PyYAML.
+    # release.py reads rab.yml with PyYAML.
     - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
       with:
         python-version: "3.12"
