@@ -1,7 +1,7 @@
 # The workflow
 
 A release is one run of `.github/workflows/release.yml`. `install` writes it
-from [`templates/release.yml`](https://github.com/buchochelliq-labs/release-kit/blob/main/templates/release.yml)
+from [`templates/release.yml`](https://github.com/buchochelliq-labs/release-asset-bundle/blob/main/templates/release.yml)
 when the repository has none. After that it is the repository's own file.
 
 ```text
@@ -102,7 +102,7 @@ change this job. Every later job needs `ci` to succeed.
   build:
     needs: [gate, ci]
     if: needs.gate.outputs.verify-only != 'true'
-    uses: ./.github/workflows/release-kit-build.yml
+    uses: ./.github/workflows/rab-build.yml
     with:
       sha: ${{ needs.gate.outputs.sha }}
       selection: ${{ needs.gate.outputs.selection }}
@@ -183,7 +183,7 @@ of yours that publishes belongs in them.
 
 ## The build workflow
 
-`.github/workflows/release-kit-build.yml` is part of the installed copy: do
+`.github/workflows/rab-build.yml` is part of the installed copy: do
 not edit it. It is a reusable workflow with two inputs, `sha` and `selection`,
 and `contents: read`. It holds no credentials.
 
@@ -255,7 +255,7 @@ commit SHA, with its version in a comment:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 ```
 
-A test in release-kit refuses any `uses:` that is not local (`./…`) or pinned
+A test in rab refuses any `uses:` that is not local (`./…`) or pinned
 this way, and Dependabot opens PRs that move a SHA and its comment together.
-Repositories get new pins by installing a newer release-kit. Pin any actions
+Repositories get new pins by installing a newer rab. Pin any actions
 you add to `release.yml` the same way.

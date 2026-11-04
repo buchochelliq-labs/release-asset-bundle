@@ -8,8 +8,8 @@ from a published GitHub release ([retry policy](#what-each-channel-allows-again-
 
 ```sh
 git switch main && git pull
-python3 .github/release-kit/scripts/release.py tag --dry-run   # see what it would do
-python3 .github/release-kit/scripts/release.py tag
+python3 .github/rab/scripts/release.py tag --dry-run   # see what it would do
+python3 .github/rab/scripts/release.py tag
 ```
 
 Every run's [release record](release-record.md) says what it published:
@@ -136,7 +136,7 @@ A verify-only run never uploads, so it cannot finish a partial upload. Use
 
 ## What each channel allows again: the retry policy
 
-Channels differ in whether publishing again is safe. release-kit defines a
+Channels differ in whether publishing again is safe. rab defines a
 retry policy per channel; it is not configured.
 
 | Channel | Policy | Publish again? | Done when | What `tag` again does | Needs a manual step |
@@ -145,7 +145,7 @@ retry policy per channel; it is not configured.
 | VS Code Marketplace, Open VSX | `once` | never for the same version, on each registry | the Marketplace lists it, and with [`open-vsx: true`](registries/vscode.md) Open VSX serves it too | skips it; with `open-vsx: true`, a version only one registry has is due, and the new run uploads only to the other | an Open VSX upload that failed for a package without `open-vsx: true` |
 | GitHub Releases | `finish` | only to finish a draft; a published release's files never change | the release is out of draft with its files | finishes a draft; skips a published one | missing assets on a published release (above) |
 | Homebrew tap | `idempotent` | yes: rendering the formula again and updating its branch and pull request is harmless | the tap's default branch has `Formula/<name>.rb` at the version, or a pull request from `<name>-<version>` is open on the tap; a prerelease is never put in the tap | selects the package again for `homebrew` only | merging the pull request (the tap's maintainers) |
-| Chocolatey | `until-accepted` | until the community repository has the version | the API lists the version, or it is submitted (in its checks or moderation); a rejected version is due again | selects the package again for `chocolatey` only | none, unless moderation rejects it for a reason in the tagged files |
+| Chocolatey | `until-accepted` | until the community repository has accepted or rejected the version | the API lists the version, or it is submitted (in its checks or moderation); a **rejected** version is terminal: never done, never due | selects the package again for `chocolatey` only; skips a rejected version with a note | a rejected version: fix the package and release a new version |
 
 `release.py status` prints each channel's policy and live state under its
 package.
@@ -156,7 +156,7 @@ package.
   from the tap (GitHub's API) and from the community repository's API every
   time `tag`, the gate or `status` needs them; nothing is written into the
   record tags. A record tag records what was released and is never rewritten
-  for a run that published; a channel's state changes outside release-kit (a
+  for a run that published; a channel's state changes outside rab (a
   maintainer merges or closes the pull request, moderators approve or reject
   a package, someone copies a formula by hand), so a stored `homebrew: done`
   could only go stale. The live state is the truth, and costs one or two
@@ -164,11 +164,17 @@ package.
 - **Submitted counts as done.** Chocolatey's moderation can take days, so
   `tag` does not wait for it: a version in moderation is reported as
   `submitted` and counts as done: pushing it again would only replace the
-  version under review. A rejected version is not done, but the community
-  repository refuses to take the same version again (approved, exempted and
-  rejected versions cannot be modified), so finishing it means fixing the
-  package and releasing a new version. Likewise an open tap pull
-  request counts as done: merging it is the tap's decision.
+  version under review. Likewise an open tap pull request counts as done:
+  merging it is the tap's decision.
+- **Rejected is terminal.** A version in moderation can be pushed again (the
+  new push replaces the one under review), but a rejected one never can:
+  `choco push` refuses it ("Package versions that are approved, rejected, or
+  exempted cannot be modified"). So a rejected version is neither done nor
+  due. The gate does not select it, `tag` does not retry or wait for it and
+  prints `note   chocolatey of <package> is rejected: publish a new version;
+  not retried`, and `status` shows `rejected: publish a new version`. Fix
+  what moderation objected to and release a new version of the package. The
+  package's other channels (Homebrew) are still finished as usual.
 - **A newer release supersedes an older one's channels.** `tag` goes back to
   finish an older release's channels only while `HEAD` names that release (or
   with `--release`); once `HEAD` names a newer one it prints a `note` and
@@ -218,7 +224,7 @@ than waiting for hours.
 | Message starts | Meaning and fix |
 |---|---|
 | `these tags already exist for something else` | A package tag on the remote is not that package's record. Give the package its own `tag:` format, or bump it. See [collisions](configuration.md#record-tags-and-collisions). |
-| `... has no release-kit.yml: the tag predates release-kit` | A record tag is on a commit from before adoption. Bump the package, or delete the stale tag if nothing was published from it. |
+| `... has no rab.yml (nor release-kit.yml): the tag predates the kit` | A record tag is on a commit from before adoption. Bump the package, or delete the stale tag if nothing was published from it. |
 | `... changes packages already tagged under the same version on other commits` | A split release. Release from the named commit (`--commit`), or bump those packages. |
 | `release-X is on <sha>, not <sha>, and its run there may have published` | Release from that commit (`--commit`) or wait for its run. |
 | `... is not on origin/main as last fetched` | Run `git fetch`, and release only merged commits. |

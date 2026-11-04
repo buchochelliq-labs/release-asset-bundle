@@ -1,12 +1,17 @@
-# release-kit
+# rab, the Release Asset Bundle
 
-release-kit is the buchochelliq-labs release standard. It was generalised from
+![BAB, the rab mascot: a baby elephant king carrying a parcel](assets/bab.svg){ width="128" align="right" }
+
+**rab**, the **Release Asset Bundle** (formerly release-kit), is the
+buchochelliq-labs release standard; around the lab it is also the
+*Buchochelliq-labs Asset Bundle*, or **BAB**, after its
+[mascot](mascot.md). It was generalised from
 the release scripts of [rs-rich-cli](https://github.com/buchochelliq-labs/rs-rich-cli),
 which publishes about twenty crates and a Python package from one repository.
 
 It has three parts:
 
-- **`release-kit.yml`**, a file at the root of your repository. It lists every
+- **`rab.yml`**, a file at the root of your repository. It lists every
   *package* the repository publishes (a crate, a Python package, an npm
   package, a VS Code extension, or a set of files on a GitHub release), the
   *registry* each one goes to, and the *artifacts* each one is built into.
@@ -17,7 +22,7 @@ It has three parts:
   `publish-github`, `publish-crates`, `publish-pypi`, `publish-npm`,
   `publish-vscode`), a reusable build workflow, and a starter `release.yml`.
 
-A repository does not reference release-kit remotely. It keeps an
+A repository does not reference rab remotely. It keeps an
 *installed copy* of the script, the actions and the build workflow under
 `.github/`, made by `release.py install`. See [Getting started](getting-started.md).
 
@@ -55,7 +60,7 @@ Selection
    commit (`Release:` and `Commit:` lines). Each package gets its own record
    tag, which starts nothing; the release tag starts the one run that
    publishes the whole release. A package tag that already exists on another
-   commit must be that package's own record, or release-kit refuses it.
+   commit must be that package's own record, or rab refuses it.
 4. **A release is one commit.** A package already tagged on another commit
    that ships different files under the same version is refused: release from
    that commit, or bump the package.
@@ -75,16 +80,16 @@ release.py tag ──▶ gate ──▶ ci ──▶ build ──▶ publish ─
 ```
 
 1. **tag.** On the default branch, a person runs
-   `python3 .github/release-kit/scripts/release.py tag`. It pushes a record tag
+   `python3 .github/rab/scripts/release.py tag`. It pushes a record tag
    for each due package, then the release tag, and waits for the run.
 2. **gate.** The run checks the release tag: annotated, on the default
-   branch, recording its commit, `release-kit.yml` valid at that commit, no
+   branch, recording its commit, `rab.yml` valid at that commit, no
    split release, every due package's record tag on the commit. It outputs the
    selection.
 3. **ci.** Your own CI workflow runs once more, on the tagged commit.
 4. **build.** One job per artifact and target builds the selected packages
    and runs each artifact's `test`.
-5. **publish.** One job per registry uploads, in `release-kit.yml` order.
+5. **publish.** One job per registry uploads, in `rab.yml` order.
    Each first refuses any version that is already out (the *preflight*).
 6. **verify.** Each publish job waits until the registry serves every
    version it uploaded.

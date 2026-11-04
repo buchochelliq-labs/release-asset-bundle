@@ -11,9 +11,9 @@ crates themselves.
 
 ## Setup, in order
 
-1. **Declare the crates.** List each crate in `release-kit.yml` with
+1. **Declare the crates.** List each crate in `rab.yml` with
    `registry: crates.io`, after the crates it depends on. `check` warns about
-   library crates in the workspace that `release-kit.yml` publishes nowhere.
+   library crates in the workspace that `rab.yml` publishes nowhere.
    That is only a warning, because some crates are meant to stay private.
 2. **Create the `crates-io` environment** in the repository's settings.
 3. **First versions use a token.** Trusted Publishing works only for a crate
@@ -29,7 +29,7 @@ crates themselves.
 
     ```yaml
           - run: python3 -m pip install --quiet pyyaml
-          - run: python3 .github/release-kit/scripts/release.py check --publish-dry-run
+          - run: python3 .github/rab/scripts/release.py check --publish-dry-run
     ```
 
 ## What `check` refuses
@@ -40,12 +40,12 @@ are read the way cargo reads them. Each message names the fix.
 
 | Problem | Message (abridged) | Fix |
 |---|---|---|
-| `publish = false` | `onto: crates/onto/Cargo.toml says publish = false` | Remove the line, or take the package out of `release-kit.yml`. |
+| `publish = false` | `onto: crates/onto/Cargo.toml says publish = false` | Remove the line, or take the package out of `rab.yml`. |
 | `publish = ["other"]` | `onto: ... publishes only to other` | Add `"crates-io"` to the list, or remove `publish`. |
 | A `git` dependency with no `version` | `onto-ods: depends on ods-erd from git (...) with no version` | Publish the dependency to crates.io first, then add a `version`. |
 | A `path` dependency with no `version` | `onto-cli: depends on onto by path with no version; crates.io needs one: onto = { path = "../onto", version = "0.2.0" }` | Add the version shown. |
 | A dependency from another registry | `onto: depends on x from the registry ...` | crates.io accepts only crates.io dependencies. |
-| A dependency that is not on crates.io at a matching version | `onto-ods: depends on ods-erd ^0.3, which is not on crates.io` | Publish it first, or list it in `release-kit.yml` before the crate that needs it. |
+| A dependency that is not on crates.io at a matching version | `onto-ods: depends on ods-erd ^0.3, which is not on crates.io` | Publish it first, or list it in `rab.yml` before the crate that needs it. |
 | The name belongs to someone else | `onto: the name is taken on crates.io (owners: ...)` | Rename the package. See [taken names](#a-taken-name). |
 | `cargo package --list` fails | `` onto: `cargo package --list` fails: ... `` | What cargo says. |
 | An embed from outside the crate | `onto-cli: src/main.rs embeds ../../../skills/onto.md, outside the crate` | Copy the file into the crate. See [embeds](#an-embed-from-outside-the-crate). |
@@ -76,7 +76,7 @@ locally.
 | the crate's `repository` is on GitHub under the repository's owner | passes (for example, a crate an organisation member owns personally) |
 | an owner is the repository's owner, or a team of it (`github:<org>:<team>`) | passes |
 | the crate's `repository` is on GitHub under someone else, and no owner matches | refuses: the name is taken |
-| anything else, such as no `repository` | warns: release-kit cannot tell |
+| anything else, such as no `repository` | warns: rab cannot tell |
 
 Whether the credential can publish the crate is not checked. The token is not
 available to `check`, and crates.io settles a Trusted Publisher when the run
@@ -100,10 +100,10 @@ in CI rather than in a quick local check. It needs Cargo 1.90 or later.
 ### Offline, and without cargo
 
 The checks that ask crates.io (dependencies, owners) are skipped with
-`check --offline`, or `RELEASE_KIT_OFFLINE=1` (which also covers
+`check --offline`, or `RAB_OFFLINE=1` (which also covers
 `preflight`). Cargo is then run with `--offline` too. Without cargo on
 `PATH`, `check` prints a warning and skips every crates.io check: it still
-checks `release-kit.yml` against the manifests.
+checks `rab.yml` against the manifests.
 
 ## Common blockers
 
@@ -136,7 +136,7 @@ name = "onto"            # the command people type
 path = "src/main.rs"
 ```
 
-Then update `name:` in `release-kit.yml`. If the crate is yours but owned by
+Then update `name:` in `rab.yml`. If the crate is yours but owned by
 a person, have that person add the organisation's team
 (`cargo owner --add github:<org>:<team>`).
 

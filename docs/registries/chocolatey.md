@@ -79,8 +79,15 @@ community repository has it. `release.py` reads the version's state from
 `https://community.chocolatey.org/api/v2/Packages(Id='<id>',Version='<version>')`,
 with `<id>` from the package's `.nuspec`: `listed` (approved), `submitted` (in
 its checks or moderation), `rejected`, or `due` (never pushed). Listed and
-submitted count as done, so `tag` does not wait days for moderation; a
-rejected or unpushed version is due. Fix the cause and run `release.py tag`:
-it pushes the release tag again with only `chocolatey` due for the package,
-and `publish-chocolatey` runs while `publish-github` is skipped. See
+submitted count as done, so `tag` does not wait days for moderation; an
+unpushed version is due. Fix the cause and run `release.py tag`: it pushes
+the release tag again with only `chocolatey` due for the package, and
+`publish-chocolatey` runs while `publish-github` is skipped.
+
+A **rejected** version is terminal. The community repository never takes the
+same version again (a version still in moderation can be pushed again; a
+rejected one cannot), so it is not due and nothing retries it: `status`
+shows `rejected: publish a new version`, `tag` notes it and does not retry,
+and the gate does not select it. Fix the package and release a new version.
+See
 [the retry policy](../recovery.md#what-each-channel-allows-again-the-retry-policy).

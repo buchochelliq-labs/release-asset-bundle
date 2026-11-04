@@ -18,7 +18,7 @@ refuses a crate that crates.io would refuse: see
 ## Credentials
 
 crates.io offers [Trusted Publishing](https://crates.io/docs/trusted-publishing),
-but only for a crate that already exists. So release-kit uses two
+but only for a crate that already exists. So rab uses two
 credentials:
 
 - **Existing crates** use Trusted Publishing.
@@ -48,11 +48,11 @@ The template's `publish-crates` job:
         if: needs.gate.outputs.verify-only != 'true'
         env:
           SELECTION: ${{ needs.gate.outputs.selection }}
-        run: python3 .github/release-kit/scripts/release.py preflight --registry crates.io --selection "$SELECTION"
+        run: python3 .github/rab/scripts/release.py preflight --registry crates.io --selection "$SELECTION"
       - id: auth
         if: steps.preflight.outputs.existing_crate == 'true'
         uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
-      - uses: ./.github/release-kit/publish-crates
+      - uses: ./.github/rab/publish-crates
         with:
           selection: ${{ needs.gate.outputs.selection }}
           new-crates: ${{ steps.preflight.outputs.new_crates || '[]' }}

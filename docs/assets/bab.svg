@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="bab-title">
+  <title id="bab-title">BAB, the rab mascot: a baby elephant king with a crown too big for him, holding a parcel by its string</title>
+  <!-- A placeholder for an artist; see docs/mascot.md. Flat shapes only. -->
+  <g stroke="#3D4556" stroke-width="4" stroke-linejoin="round" stroke-linecap="round">
+    <!-- body and feet -->
+    <ellipse cx="128" cy="192" rx="60" ry="46" fill="#A7B1C2"/>
+    <ellipse cx="98" cy="232" rx="22" ry="13" fill="#A7B1C2"/>
+    <ellipse cx="158" cy="232" rx="22" ry="13" fill="#A7B1C2"/>
+    <!-- ears -->
+    <ellipse cx="66" cy="114" rx="40" ry="46" fill="#97A2B5"/>
+    <ellipse cx="190" cy="114" rx="40" ry="46" fill="#97A2B5"/>
+    <ellipse cx="70" cy="116" rx="24" ry="30" fill="#EBB8BE" stroke="none"/>
+    <ellipse cx="186" cy="116" rx="24" ry="30" fill="#EBB8BE" stroke="none"/>
+    <!-- head -->
+    <circle cx="128" cy="112" r="54" fill="#A7B1C2"/>
+  </g>
+  <!-- toenails -->
+  <g fill="#F4F1EA">
+    <ellipse cx="88" cy="238" rx="5" ry="3.5"/>
+    <ellipse cx="100" cy="240" rx="5" ry="3.5"/>
+    <ellipse cx="156" cy="240" rx="5" ry="3.5"/>
+    <ellipse cx="168" cy="238" rx="5" ry="3.5"/>
+  </g>
+  <!-- the parcel, tied with string -->
+  <g stroke="#3D4556" stroke-width="4" stroke-linejoin="round">
+    <rect x="94" y="178" width="68" height="46" rx="5" fill="#D29A5E"/>
+  </g>
+  <g stroke="#7A4B2A" stroke-width="5" stroke-linecap="round" fill="none">
+    <path d="M128 180 V222"/>
+    <path d="M96 201 H160"/>
+  </g>
+  <!-- the bow on top -->
+  <g stroke="#7A4B2A" stroke-width="3.5" stroke-linejoin="round" fill="#E3B27A">
+    <path d="M128 176 C116 160 100 162 104 174 C107 182 120 180 128 176 Z"/>
+    <path d="M128 176 C140 160 156 162 152 174 C149 182 136 180 128 176 Z"/>
+  </g>
+  <circle cx="128" cy="176" r="5" fill="#7A4B2A"/>
+  <!-- trunk, holding the string: an outline stroke under the trunk's own -->
+  <path d="M128 132 C126 148 122 158 126 168" fill="none" stroke="#3D4556" stroke-width="22" stroke-linecap="round"/>
+  <path d="M128 132 C126 148 122 158 126 168" fill="none" stroke="#A7B1C2" stroke-width="14" stroke-linecap="round"/>
+  <!-- face -->
+  <ellipse cx="106" cy="104" rx="7" ry="9" fill="#2B303B"/>
+  <ellipse cx="150" cy="104" rx="7" ry="9" fill="#2B303B"/>
+  <circle cx="108.5" cy="100.5" r="2.5" fill="#FFFFFF"/>
+  <circle cx="152.5" cy="100.5" r="2.5" fill="#FFFFFF"/>
+  <circle cx="92" cy="124" r="8" fill="#E79AA6" opacity="0.7"/>
+  <circle cx="164" cy="124" r="8" fill="#E79AA6" opacity="0.7"/>
+  <!-- the crown: simple, gold, slightly too big, slipping to one side -->
+  <g transform="rotate(-10 128 64)" stroke="#8A5A12" stroke-width="4" stroke-linejoin="round">
+    <path d="M80 76 V34 L100 52 L114 24 L128 46 L142 24 L156 52 L176 34 V76 Z" fill="#F2C14E"/>
+    <rect x="78" y="62" width="100" height="16" rx="4" fill="#E9A93A"/>
+    <g stroke-width="3">
+      <circle cx="80" cy="32" r="5" fill="#F2C14E"/>
+      <circle cx="114" cy="22" r="5" fill="#F2C14E"/>
+      <circle cx="142" cy="22" r="5" fill="#F2C14E"/>
+      <circle cx="176" cy="32" r="5" fill="#F2C14E"/>
+      <circle cx="104" cy="70" r="4.5" fill="#D1495B"/>
+      <circle cx="128" cy="70" r="5.5" fill="#3E7CB1"/>
+      <circle cx="152" cy="70" r="4.5" fill="#D1495B"/>
+    </g>
+  </g>
+</svg>

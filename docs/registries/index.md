@@ -1,6 +1,6 @@
 # Registries
 
-A package's `registry` field says where it is published. release-kit supports
+A package's `registry` field says where it is published. rab supports
 five:
 
 | `registry` | Where | Publishes | Credential | Environment |
@@ -26,7 +26,7 @@ Every publish action follows the same steps:
 
 1. **preflight**: refuse any selected version already on the registry
    (rule 1), in case another run published it since the gate;
-2. **upload**, in `release-kit.yml` order;
+2. **upload**, in `rab.yml` order;
 3. **verify**: wait until the registry serves every selected version;
 4. **consume**, for crates.io and PyPI: use each version as a stranger
    would. (npm's action currently consumes only in verify-only runs; see

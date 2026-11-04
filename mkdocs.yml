@@ -1,12 +1,16 @@
-# The release-kit documentation site, built with Zensical:
+# The rab (Release Asset Bundle) documentation site, built with Zensical:
 #   pip install zensical && zensical build --strict
-# The built site makes no third-party requests: no web fonts, no external
-# scripts, and no repository-statistics widget (so no `repo_url`).
-site_name: release-kit
+# The built site loads no web fonts and no external scripts. With `repo_url`
+# the header links the repository, and the reader's browser asks GitHub's API
+# for its statistics: the site's one third-party request.
+site_name: rab, the Release Asset Bundle
 site_description: >-
-  The buchochelliq-labs release standard: one file declares what a repository
-  publishes, one command tags a release, one workflow run publishes it.
-site_url: https://buchochelliq-labs.github.io/release-kit/
+  rab (formerly release-kit), the buchochelliq-labs release standard: one file
+  declares what a repository publishes, one command tags a release, one
+  workflow run publishes it.
+site_url: https://buchochelliq-labs.github.io/release-asset-bundle/
+repo_url: https://github.com/buchochelliq-labs/release-asset-bundle
+repo_name: buchochelliq-labs/release-asset-bundle
 docs_dir: docs
 site_dir: site
 copyright: buchochelliq-labs
@@ -14,6 +18,8 @@ copyright: buchochelliq-labs
 theme:
   name: material
   font: false
+  logo: assets/bab.svg
+  favicon: assets/bab.svg
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
@@ -48,7 +54,7 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Getting started: getting-started.md
-  - release-kit.yml reference: configuration.md
+  - rab.yml reference: configuration.md
   - Commands: commands.md
   - The workflow: workflow.md
   - Recovering a failed release: recovery.md
@@ -63,5 +69,7 @@ nav:
       - VS Code Marketplace and Open VSX: registries/vscode.md
       - Homebrew: registries/homebrew.md
       - Chocolatey: registries/chocolatey.md
+  - Migrating from release-kit 1.x: migrating-to-rab.md
   - Migrating from rs-rich-cli: migrating-from-rs-rich-cli.md
+  - BAB, the mascot: mascot.md
   - Versions and changelog: changelog.md

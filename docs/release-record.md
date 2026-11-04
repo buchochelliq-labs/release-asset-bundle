@@ -29,10 +29,10 @@ jq -r .result release-record.json               # complete | partial | nothing-p
 the current directory. A token that can read the repository's Actions
 artifacts is enough (`actions: read` on a private repository).
 
-!!! note "Repositories that installed an older release-kit"
+!!! note "Repositories that installed release-kit 1.x"
     `install` writes `release.yml` only when a repository has none, so an
     existing `release.yml` has no `record` job. Copy it from
-    [`templates/release.yml`](https://github.com/buchochelliq-labs/release-kit/blob/main/templates/release.yml)
+    [`templates/release.yml`](https://github.com/buchochelliq-labs/release-asset-bundle/blob/main/templates/release.yml)
     to the end of yours, and list in its `needs` every job of yours that
     publishes (`record` refuses a selected package whose publish job it does
     not need).
@@ -94,14 +94,14 @@ unknown `outcome` as not published.
 |---|---|
 | `schema_version` | `1` |
 | `repository` | `owner/name` |
-| `release` | the release's name (`release-kit.yml`'s `name_from` package's version), or `null` if `release-kit.yml` could not be read at the tag |
+| `release` | the release's name (`rab.yml`'s `name_from` package's version), or `null` if `rab.yml` could not be read at the tag |
 | `tag` | the release tag the run was for |
 | `commit` | the tagged commit (40 hex digits), or `null` if the tag could not be resolved |
 | `verify_only` | whether this was a [verify-only run](recovery.md#verify-only-runs) |
 | `run` | `id`, `attempt` and `url` of the workflow run |
 | `result` | the run as a whole: see below |
 | `jobs` | the result of each job the `record` job needs: `success`, `failure`, `cancelled` or `skipped` |
-| `packages` | every package of `release-kit.yml` at the tagged commit, in its order |
+| `packages` | every package of `rab.yml` at the tagged commit, in its order |
 
 `result`:
 
@@ -116,7 +116,7 @@ unknown `outcome` as not published.
 
 | Field | Value |
 |---|---|
-| `name`, `registry`, `version` | as in `release-kit.yml` |
+| `name`, `registry`, `version` | as in `rab.yml` |
 | `tag` | its record tag |
 | `selected` | whether the gate selected it for this run |
 | `outcome` | see below |

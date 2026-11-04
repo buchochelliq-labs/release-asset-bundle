@@ -22,7 +22,7 @@ is the file the action publishes.
 With `open-vsx: true`, Open VSX is part of the package's publication: the
 version is due until **both** registries have it, so `status`, `tag` and the
 gate select it while either lacks it, and `verify` waits for both. Open VSX
-is declared in `release-kit.yml`, not inferred from the `OVSX_PAT` secret,
+is declared in `rab.yml`, not inferred from the `OVSX_PAT` secret,
 because the gate and `status` run without the publish job's secrets and must
 still know what "published" means.
 

@@ -5,11 +5,19 @@ repository (it works from the repository root, found with
 `git rev-parse --show-toplevel`):
 
 ```sh
-python3 .github/release-kit/scripts/release.py <command> [options]
+python3 .github/rab/scripts/release.py <command> [options]
 ```
 
 It needs Python 3.11 or newer, git and PyYAML. It exits 0 on success and 1 on
 any refusal, printing `error: <reason>` to standard error.
+
+`release.py --version` prints the kit's version (`rab 2.0.0`).
+
+It reads the release configuration from `rab.yml`. Until rab 3.0.0, a
+repository still on release-kit 1.x's name is read from `release-kit.yml`,
+with a warning naming `rab.yml`; when both files exist, every command refuses
+until one is deleted. Likewise `RELEASE_KIT_OFFLINE` is read when
+`RAB_OFFLINE` is unset, with a warning.
 
 People run the [person commands](#person-commands). The release workflow runs
 the [CI commands](#ci-commands); you can run them by hand to see what a run
@@ -23,21 +31,21 @@ would do.
 release.py check [--offline] [--publish-dry-run]
 ```
 
-Checks `release-kit.yml` against the repository's manifests: versions,
+Checks `rab.yml` against the repository's manifests: versions,
 names, tag formats, dependency order and artifacts. The full list is in the
 [reference](configuration.md#what-check-refuses). On success it prints
-`release-kit.yml matches the repository (release 0.1.0).`; otherwise it prints
+`rab.yml matches the repository (release 0.1.0).`; otherwise it prints
 one problem per line and exits 1. Run it in CI.
 
 For crates.io packages, it then checks what `cargo publish` would refuse:
 manifests, dependencies, who owns the name, and what each package carries
 (see [Publishing to crates.io](registries/publishing-to-crates-io.md)). It
 also warns, on lines starting `warning:`, about library crates in the
-workspace that `release-kit.yml` does not publish. Warnings do not fail it.
+workspace that `rab.yml` does not publish. Warnings do not fail it.
 
 | Option | Meaning |
 |---|---|
-| `--offline` | Skip the checks that ask crates.io. `RELEASE_KIT_OFFLINE=1` does the same. |
+| `--offline` | Skip the checks that ask crates.io. `RAB_OFFLINE=1` does the same. |
 | `--publish-dry-run` | Also run `cargo publish --dry-run --locked` over every crates.io package. This builds them, so use it in CI. |
 
 ### `sync`
@@ -47,7 +55,7 @@ release.py sync
 ```
 
 After you bump versions in the manifests, rewrites each package's `version:`
-line in `release-kit.yml` to match, quoted, keeping comments and layout. It
+line in `rab.yml` to match, quoted, keeping comments and layout. It
 prints one line per change (`onto: 0.1.0 -> 0.2.0`) or `Nothing to change.`
 
 ### `status`
@@ -62,8 +70,8 @@ per package: the package, its record tag, the commit that tag is on (or
 `homebrew` or `chocolatey`, one line per such channel gives its
 [retry policy](recovery.md#what-each-channel-allows-again-the-retry-policy)
 and its state, read live once the release is out: `merged`, `proposed`,
-`prerelease` or `due` for Homebrew; `listed`, `submitted`, `rejected` or `due`
-for Chocolatey.
+`prerelease` or `due` for Homebrew; `listed`, `submitted`, `due`, or
+`rejected: publish a new version` (terminal: not retried) for Chocolatey.
 
 ```text
 Release 0.2.0 (tag release-0.2.0: not tagged)
@@ -99,7 +107,7 @@ Tags the release and waits for its run to publish it.
    otherwise it prints a `note`). `tag` goes back to that commit. A tag whose run
    provably published nothing does not hold its commit.
 3. Otherwise, with `--release`, the last commit on `<remote>/<branch>`
-   (first-parent history) whose `release-kit.yml` names that release.
+   (first-parent history) whose `rab.yml` names that release.
 4. Otherwise `HEAD`.
 
 The commit must be on `<remote>/<branch>` **as last fetched** (`tag` does not
@@ -107,7 +115,7 @@ fetch the branch): run `git pull` or `git fetch` first.
 
 **What it checks.** It refuses when a package tag on the remote is not that
 package's own record ([collisions](configuration.md#record-tags-and-collisions)),
-when `release-kit.yml` at the commit fails `check`, and when the release would
+when `rab.yml` at the commit fails `check`, and when the release would
 be split (rule 4).
 
 **What it does**, one line per package:
@@ -162,16 +170,31 @@ not move or retag tags, and it waits on the registries alone. See
 ### `install`
 
 ```sh
-python3 ../release-kit/scripts/release.py install [--into DIR]
+python3 ../release-asset-bundle/scripts/release.py install [--into DIR]
 ```
 
-Run from a release-kit checkout's script, in the repository to install into
+Run from a checkout's script (a clone of
+`buchochelliq-labs/release-asset-bundle`), in the repository to install into
 (or name it with `--into`). It refuses to run from an installed copy, and to
-install into release-kit itself. It replaces `.github/release-kit/`, writes
-`.github/workflows/release-kit-build.yml`, writes a starter
+install into the kit itself. It replaces `.github/rab/`, writes
+`.github/workflows/rab-build.yml`, writes a starter
 `.github/workflows/release.yml` only if there is none, and prints every path
 written. The version recorded is `git describe --tags --always --dirty` of
 the checkout. See [Getting started](getting-started.md#1-install-the-copy).
+
+In a repository with release-kit 1.x's layout, `install` first migrates it,
+and prints each change:
+
+- `release-kit.yml` becomes `rab.yml` (with `git mv` when git tracks it);
+- `.github/release-kit/` and `.github/workflows/release-kit-build.yml` are
+  removed (the new copy is written at `.github/rab/` and
+  `.github/workflows/rab-build.yml`);
+- in every workflow under `.github/workflows/` (your `release.yml`, and a CI
+  workflow that runs `check` or `vendored`), `.github/release-kit/` becomes
+  `.github/rab/` and `release-kit-build.yml` becomes `rab-build.yml`.
+
+It refuses, changing nothing, when both `rab.yml` and `release-kit.yml`
+exist. See [Migrating from release-kit 1.x](migrating-to-rab.md).
 
 ### `vendored`
 
@@ -179,16 +202,20 @@ the checkout. See [Getting started](getting-started.md#1-install-the-copy).
 release.py vendored
 ```
 
-Checks the installed copy against `.github/release-kit/manifest.json`. It
+Checks the installed copy against `.github/rab/manifest.json`. It
 fails if the manifest is missing, if a listed file is missing or edited, or if
-a file not in the manifest was added under `.github/release-kit/`
+a file not in the manifest was added under `.github/rab/`
 (`__pycache__` is ignored). On success it prints
-`release-kit v1.2.0: the installed copy is unmodified.` Run it in CI.
+`rab v2.0.0: the installed copy is unmodified.` Run it in CI.
+
+A copy still at release-kit 1.x's `.github/release-kit/` (with no
+`.github/rab/`) is checked there, with a warning to install again. A
+`.github/release-kit/` left next to `.github/rab/` is a problem.
 
 ## CI commands
 
 These take the gate's *selection*: a JSON list with one object per selected
-package, in `release-kit.yml` order:
+package, in `rab.yml` order:
 
 ```json
 [{"name": "onto", "registry": "crates.io", "version": "0.2.0",
@@ -221,7 +248,7 @@ release.py gate TAG [--remote NAME] [--verify-only]
 It refuses unless:
 
 1. `TAG` is an annotated tag;
-2. `release-kit.yml` at the tagged commit passes `check`;
+2. `rab.yml` at the tagged commit passes `check`;
 3. `TAG` is that commit's release tag;
 4. the commit is on `<remote>/<branch>` (fetched first);
 5. the tag's message records `Release: <name>` and `Commit: <sha>`;
@@ -380,7 +407,7 @@ release.py record --schema
 | `--schema` | | print the record's JSON Schema and stop |
 
 Writes the run's [release record](release-record.md): every package of
-`release-kit.yml` at the commit, whether the gate selected it, its publish
+`rab.yml` at the commit, whether the gate selected it, its publish
 job's result, its outcome, its registry URL and the SHA-256 of the files built
 for it. A selected package whose publish job did not succeed is looked up on
 its registry, as `verify` does. It checks the record against its schema,
