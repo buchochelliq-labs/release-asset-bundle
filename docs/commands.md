@@ -262,7 +262,8 @@ per job and writes two outputs: `jobs` (a JSON list for a matrix's `include`)
 and `count`.
 
 Each job carries `id`, `kind`, `os`, `target`, `package`, `slug`, `version`,
-`registry`, `manifest` and `test`, plus what its kind needs (`bin`, `crate`,
+`registry`, `manifest`, `tag` (the package's record tag, which the build
+job checks out) and `test`, plus what its kind needs (`bin`, `crate`,
 `include`; `cargo`; `dir`; `run`, `outputs`). Job ids:
 
 | Kind | Job id |

@@ -1324,6 +1324,117 @@ class ReleaseRecord(unittest.TestCase):
                          ("complete", {"id": 7, "attempt": 2, "url": "https://github.com/org/repo/actions/runs/7"}))
 
 
+KIT = Path(__file__).resolve().parent.parent
+
+
+def kit_yaml(path):
+    import yaml
+    return yaml.safe_load((KIT / path).read_text())
+
+
+def every_step(document):
+    for job in (document.get("jobs") or {}).values():
+        yield from job.get("steps") or []
+    yield from (document.get("runs") or {}).get("steps") or []
+
+
+class ReleaseRuns(unittest.TestCase):
+    """A release run builds the commit the gate checked, and writes no cache
+    (GitHub's cache is shared with the default branch: CodeQL's
+    actions/cache-poisoning queries)."""
+
+    def test_builds_check_out_a_record_tag_and_stop_unless_it_names_the_gated_commit(self):
+        workflow = kit_yaml("workflows/release-kit-build.yml")
+        for name, job in workflow["jobs"].items():
+            steps = job["steps"]
+            checkout = steps[0]
+            self.assertTrue(checkout["uses"].startswith("actions/checkout@"), name)
+            self.assertTrue(checkout["with"]["ref"].startswith("refs/tags/${{"), name)
+            self.assertEqual(checkout["with"]["persist-credentials"], False, name)
+            # The check runs next, before anything from the checkout does.
+            check = steps[1]
+            self.assertNotIn("uses", check, name)
+            self.assertEqual(check["env"]["SHA"], "${{ inputs.sha }}", name)
+            self.assertEqual(checkout["with"]["ref"], "refs/tags/" + check["env"]["TAG"], name)
+        self.assertNotIn("ref: ${{ inputs.sha }}", (KIT / "workflows/release-kit-build.yml").read_text())
+
+    def test_the_check_refuses_a_tag_moved_since_the_gate(self):
+        script = kit_yaml("workflows/release-kit-build.yml")["jobs"]["build"]["steps"][1]["run"]
+        with tempfile.TemporaryDirectory() as d:
+            sh(d, "git", "init", "-q", "-b", "main")
+            sh(d, "git", "commit", "-q", "--allow-empty", "-m", "gated")
+            gated = sh(d, "git", "rev-parse", "HEAD")
+            sh(d, "git", "commit", "-q", "--allow-empty", "-m", "moved")
+
+            def check(sha):
+                return subprocess.run(["bash", "-c", script], cwd=d, text=True, capture_output=True,
+                                      env={**os.environ, "TAG": "app-v1.0.0", "SHA": sha})
+            moved = check(gated)
+            self.assertEqual(moved.returncode, 1)
+            self.assertIn("not " + gated, moved.stdout)
+            self.assertEqual(check(sh(d, "git", "rev-parse", "HEAD")).returncode, 0)
+
+    def test_the_plan_names_each_jobs_record_tag(self):
+        files = {"py/pyproject.toml": '[project]\nname = "pkg"\nversion = "1.0"\n',
+                 "release-kit.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
+                                    '    version: "1.0"\n    tag: "python-v{version}"\n'
+                                    '    artifacts: [{kind: python}]\n'}
+        jobs = release.plan(json.dumps([{"name": "pkg", "registry": "pypi"}]), read=reader(files))
+        self.assertEqual([j["tag"] for j in jobs], ["python-v1.0"])
+
+    def test_the_record_job_checks_out_the_release_tag_and_checks_it(self):
+        # #18 under the same rule: a tag ref, verified against the gate's sha.
+        steps = kit_yaml("templates/release.yml")["jobs"]["record"]["steps"]
+        checkout, check = steps[0], steps[1]
+        self.assertTrue(checkout["uses"].startswith("actions/checkout@"))
+        self.assertEqual(checkout["with"]["ref"], "refs/tags/" + check["env"]["TAG"])
+        self.assertEqual(check["env"]["SHA"], "${{ needs.gate.outputs.sha }}")
+        with tempfile.TemporaryDirectory() as d:
+            sh(d, "git", "init", "-q", "-b", "main")
+            sh(d, "git", "commit", "-q", "--allow-empty", "-m", "gated")
+            gated = sh(d, "git", "rev-parse", "HEAD")
+            sh(d, "git", "commit", "-q", "--allow-empty", "-m", "moved")
+
+            def run(sha):
+                return subprocess.run(["bash", "-c", check["run"]], cwd=d, text=True, capture_output=True,
+                                      env={**os.environ, "TAG": "release-1.0.0", "SHA": sha}).returncode
+            self.assertEqual(run(gated), 1, "a moved tag")
+            self.assertEqual(run(sh(d, "git", "rev-parse", "HEAD")), 0)
+            self.assertEqual(run(""), 0, "a failed gate has no sha: the record still says what happened")
+
+    def test_a_channel_only_selection_plans_nothing_and_its_entry_has_a_record_tag(self):
+        # #20 with the build's checkout: plan checks out selection[0].tag,
+        # which the gate found on sha; the package itself builds nothing.
+        files = dict(FILES, **{"release-kit.yml": CONFIG + (
+            "  - name: tool-bin\n    registry: github\n    manifest: crates/tool/Cargo.toml\n    version: '0.2.0'\n"
+            "    tag: 'v{version}'\n    artifacts: [{kind: rust-binary, bin: tool}]\n"
+            "    homebrew: {tap: org/homebrew-tap, formula: tool.rb.tmpl}\n")})
+        release_ = release.load(reader(files))
+        package = release_.packages[-1]
+        with tempfile.TemporaryDirectory() as d:
+            selection = release.gate_outputs("0" * 40, release_, [package], False, Path(d) / "out",
+                                             {package: ["homebrew"]})["selection"]
+            self.assertEqual(json.loads(selection)[0]["tag"], "v0.2.0")
+            self.assertEqual(release.plan(selection, read=reader(files), output=Path(d) / "plan"), [])
+            full = release.gate_outputs("0" * 40, release_, [package], False, Path(d) / "out")["selection"]
+            self.assertTrue(all(j["tag"] == "v0.2.0" for j in release.plan(full, read=reader(files),
+                                                                             output=Path(d) / "plan")))
+
+    def test_nothing_writes_a_cache(self):
+        files = [*KIT.glob("*/action.yml"), *KIT.glob("workflows/*.yml"), *KIT.glob("templates/*.yml")]
+        for file in files:
+            for step in every_step(kit_yaml(file.relative_to(KIT))):
+                uses, given = step.get("uses", ""), step.get("with") or {}
+                where = f"{file.relative_to(KIT)}: {uses}"
+                self.assertFalse(uses.startswith("actions/cache"), where)
+                self.assertNotIn("cache", given, where)
+                if uses.startswith("actions/setup-node@"):
+                    # On by default when package.json names npm as packageManager.
+                    self.assertEqual(given.get("package-manager-cache"), False, where)
+                if uses.startswith("PyO3/maturin-action@"):
+                    self.assertEqual(given.get("sccache"), "false", where)
+
+
 class Install(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()

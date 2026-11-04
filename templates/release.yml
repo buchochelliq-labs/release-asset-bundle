@@ -273,6 +273,7 @@ jobs:
         with:
           node-version: "24"
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false   # release jobs write no caches
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
@@ -300,6 +301,7 @@ jobs:
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: "24"
+          package-manager-cache: false   # release jobs write no caches
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"
@@ -332,6 +334,20 @@ jobs:
         with:
           ref: refs/tags/${{ inputs.tag || github.ref_name }}
           persist-credentials: false
+      # As in the build workflow: the release tag must still name the commit
+      # the gate checked before anything from the checkout runs. (When the
+      # gate failed there is no such commit; the record then says so.)
+      - name: Check the tag still names the gated commit
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          SHA: ${{ needs.gate.outputs.sha }}
+        run: |
+          at=$(git rev-parse HEAD)
+          if [ -n "$SHA" ] && [ "$at" != "$SHA" ]; then
+            echo "::error::$TAG is at $at, not $SHA, the commit the gate checked; no record is written"
+            exit 1
+          fi
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.12"

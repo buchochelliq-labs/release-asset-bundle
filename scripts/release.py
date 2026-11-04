@@ -637,7 +637,7 @@ def plan(selection, read=None, output=None):
         if (package.registry, package.name) not in wanted:
             continue
         base = {"package": package.name, "slug": package.slug, "version": package.version,
-                "registry": package.registry, "manifest": package.manifest}
+                "registry": package.registry, "manifest": package.manifest, "tag": package.tag}
         for index, artifact in enumerate(package.artifacts):
             kind = artifact["kind"]
             base["prepare"] = artifact.get("prepare") or ""

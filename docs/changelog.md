@@ -104,6 +104,24 @@ crates.io` runs the same checks on the selected crates. New page:
 Rust repository, `check` now runs cargo and asks crates.io (about one
 request a second); without cargo it warns and skips these checks.
 
+**Release builds check out a record tag and write no caches.** The build
+workflow's `plan` and `build` jobs check out a record tag the gate checked
+(`refs/tags/<name>-v<version>`) instead of the bare `sha`, and stop before
+anything from the checkout runs unless the tag still names `sha`, so a tag
+moved during the run builds nothing; the `record` job checks its release
+tag against `sha` the same way. Every `actions/setup-node` in the kit
+and the template sets `package-manager-cache: false`, which setup-node
+otherwise turns on by itself when `package.json` names npm as its
+`packageManager`, and `PyO3/maturin-action` sets `sccache: "false"`: a run
+dispatched from `main` shares the default branch's cache, and a release run
+adds nothing to it. GitHub CodeQL's
+`actions/cache-poisoning/poisonable-step` alerts on an installed copy (a
+checkout of `inputs.sha` followed by the `plan` and `build` actions) go
+away. Install the new version; `release.yml` needs no change, except to add
+`package-manager-cache: false` to the `setup-node` steps of an installed
+`publish-npm` or `publish-vscode` job. See
+[No caches](workflow.md#no-caches).
+
 **Promote reviewed CI artifacts.** A new artifact kind, `ci-artifact`,
 publishes the files of a pinned GitHub Actions artifact unchanged instead of
 building them again: for releases that must ship exactly the bytes CI built
