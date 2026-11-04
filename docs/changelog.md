@@ -38,6 +38,16 @@ want, run `install`, and open a PR.
 
 ### Unreleased
 
+**GitHub releases are drafts until complete.** `publish-github` creates the
+release as a draft, uploads and checks every file, then publishes it. A
+draft does not count as published, so a run that stopped halfway is
+finished by the next one instead of leaving an incomplete public release.
+
+**Commands run in bash on Windows.** `prepare`, `test`, `command` and
+`notes` run as `bash -c <command>`. They used `shell=True` with bash as the
+executable, which on Windows still builds `<shell> /c "..."`, so they
+failed on Windows runners.
+
 **GitHub release options.** A `github` package takes `notes` (a command
 whose output is the release's notes, for example a CHANGELOG section;
 otherwise GitHub generates them), `checksums` (one `SHA256SUMS`-style file
