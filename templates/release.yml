@@ -48,6 +48,8 @@ jobs:
       pypi: ${{ steps.gate.outputs.pypi }}
       npm: ${{ steps.gate.outputs.npm }}
       vscode: ${{ steps.gate.outputs.vscode }}
+      homebrew: ${{ steps.gate.outputs.homebrew }}
+      chocolatey: ${{ steps.gate.outputs.chocolatey }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -111,6 +113,57 @@ jobs:
         with:
           selection: ${{ needs.gate.outputs.selection }}
           verify-only: ${{ needs.gate.outputs.verify-only }}
+
+  # From the GitHub release, once it is out: a github package's `homebrew`
+  # formula, attached to the release and proposed to the tap with the
+  # environment's HOMEBREW_TAP_TOKEN (without it, only a notice).
+  publish-homebrew:
+    needs: [gate, publish-github]
+    if: >-
+      !cancelled() && needs.gate.outputs.homebrew == 'true' && needs.publish-github.result == 'success'
+      && needs.gate.outputs.verify-only != 'true'
+    runs-on: ubuntu-latest
+    environment: homebrew
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet pyyaml
+      - uses: ./.github/release-kit/publish-homebrew
+        with:
+          selection: ${{ needs.gate.outputs.selection }}
+          tap-token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+
+  # A github package's `chocolatey` package, installed from the release on
+  # Windows and pushed with the environment's CHOCOLATEY_API_KEY.
+  publish-chocolatey:
+    needs: [gate, publish-github]
+    if: >-
+      !cancelled() && needs.gate.outputs.chocolatey == 'true' && needs.publish-github.result == 'success'
+      && needs.gate.outputs.verify-only != 'true'
+    runs-on: windows-latest
+    environment: chocolatey
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --quiet pyyaml
+      - uses: ./.github/release-kit/publish-chocolatey
+        with:
+          selection: ${{ needs.gate.outputs.selection }}
+          api-key: ${{ secrets.CHOCOLATEY_API_KEY }}
 
   # crates.io publishes from source. Crates already on crates.io upload with
   # Trusted Publishing; a crate's first version cannot (crates.io offers it

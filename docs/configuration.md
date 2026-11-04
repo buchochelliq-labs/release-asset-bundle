@@ -52,6 +52,8 @@ from the manifests:
 | `notes` | no, `github` only | A bash command whose output is the release's notes. Default: GitHub generates them. See [GitHub release options](#github-release-options). |
 | `checksums` | no, `github` only | The name of one file, e.g. `SHA256SUMS`, listing the SHA-256 of every asset, uploaded with them. |
 | `attest` | no, `github` only | `true` attests the assets' build provenance. |
+| `homebrew` | no, `github` only | `{tap, formula, name}`: a Homebrew formula, proposed to a tap. See [Homebrew](registries/homebrew.md). |
+| `chocolatey` | no, `github` only | `{package, test}`: a Chocolatey package. See [Chocolatey](registries/chocolatey.md). |
 
 ### Manifests
 

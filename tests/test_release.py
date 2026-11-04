@@ -640,7 +640,8 @@ class GitHubReleaseOptions(unittest.TestCase):
             shape = release.github_release(
                 "app", stage, Path(d) / "notes.md", runner=runner,
                 read=self.config('    notes: ./notes.sh "$VERSION"\n    checksums: SHA256SUMS\n    attest: true\n'))
-            self.assertEqual(shape, {"notes": True, "attest": True, "checksums": "SHA256SUMS"})
+            self.assertEqual(shape, {"notes": True, "attest": True, "checksums": "SHA256SUMS", "homebrew": {},
+                                     "chocolatey": {}})
             self.assertEqual(calls, [('./notes.sh "$VERSION"', "1.0.0", "v1.0.0")])
             self.assertEqual((Path(d) / "notes.md").read_text(), "## 1.0.0\n\nNotes.\n")
             import hashlib
@@ -651,7 +652,7 @@ class GitHubReleaseOptions(unittest.TestCase):
     def test_without_options_github_generates_the_notes(self):
         with tempfile.TemporaryDirectory() as d:
             shape = release.github_release("app", d, Path(d) / "notes.md", read=self.config(""))
-            self.assertEqual(shape, {"notes": False, "attest": False, "checksums": ""})
+            self.assertEqual(shape, {"notes": False, "attest": False, "checksums": "", "homebrew": {}, "chocolatey": {}})
             self.assertEqual(list(Path(d).iterdir()), [])
 
     def test_empty_notes_are_refused(self):
@@ -659,6 +660,100 @@ class GitHubReleaseOptions(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 release.github_release("app", d, Path(d) / "n.md", read=self.config("    notes: 'true'\n"),
                                        runner=lambda c, **k: subprocess.CompletedProcess(c, 0, stdout="\n"))
+
+
+class Channels(unittest.TestCase):
+    """Homebrew and Chocolatey, made from a github package's release."""
+
+    CONFIG = ('packages:\n  - name: tool\n    registry: github\n    manifest: Cargo.toml\n'
+              '    version: "1.2.0"\n    tag: "v{version}"\n'
+              '    artifacts: [{kind: rust-binary, bin: tool}]\n'
+              '    homebrew: {tap: org/homebrew-tap, formula: packaging/tool.rb.tmpl}\n'
+              '    chocolatey: {package: packaging/choco, test: tool --version}\n')
+    SUMS = "\n".join(f"{c * 64}  tool-v1.2.0-{t}" for c, t in [
+        ("a", "aarch64-apple-darwin.tar.gz"), ("b", "x86_64-unknown-linux-musl.tar.gz"),
+        ("c", "x86_64-pc-windows-msvc.zip")]) + "\n" + "d" * 64 + "  SHA256SUMS\n"
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.cwd = os.getcwd()
+        os.chdir(self.dir.name)
+        files = {
+            "Cargo.toml": '[package]\nname = "tool"\nversion = "1.2.0"\n',
+            "release-kit.yml": self.CONFIG,
+            "packaging/tool.rb.tmpl": 'class Tool < Formula\n  version "${version}"\n'
+                                      '  url "${url_aarch64_apple_darwin}"\n  sha256 "${sha256_aarch64_apple_darwin}"\n'
+                                      '  def install\n    bin.install "tool"  # #{prefix} stays\n  end\nend\n',
+            "packaging/choco/tool.nuspec.tmpl": "<version>${version}</version>\n",
+            "packaging/choco/tools/chocolateyinstall.ps1.tmpl":
+                "$d = ${env:TEMP}\nurl64bit = '${url_x86_64_pc_windows_msvc}'\nchecksum64 = '${sha256_x86_64_pc_windows_msvc}'\n",
+            "packaging/choco/tools/LICENSE.txt": "MIT\n",
+        }
+        for name, text in files.items():
+            Path(name).parent.mkdir(parents=True, exist_ok=True)
+            Path(name).write_text(text)
+        sh(".", "git", "init", "-q")
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        self.dir.cleanup()
+
+    def test_channels_are_checked(self):
+        read = files_on_disk = release.files_on_disk(Path.cwd())
+        self.assertEqual(release.check(read), [])
+        for bad, message in [("{tap: org/homebrew-tap}", "homebrew needs formula"),
+                             ("{tap: nope, formula: f}", "tap is owner/repository"),
+                             ("{tap: org/t, formula: f, url: x}", "does not take url")]:
+            Path("release-kit.yml").write_text(self.CONFIG.replace(
+                "{tap: org/homebrew-tap, formula: packaging/tool.rb.tmpl}", bad))
+            self.assertIn(message, "\n".join(release.check(files_on_disk)), bad)
+
+    def test_the_formula_is_rendered_from_the_release(self):
+        [formula] = release.render_channel("tool", "homebrew", self.SUMS, "out", repo="org/tool")
+        self.assertEqual(formula.name, "tool.rb")
+        text = formula.read_text()
+        self.assertIn('version "1.2.0"', text)
+        self.assertIn('url "https://github.com/org/tool/releases/download/v1.2.0/'
+                      'tool-v1.2.0-aarch64-apple-darwin.tar.gz"', text)
+        self.assertIn(f'sha256 "{"a" * 64}"', text)
+        self.assertIn("#{prefix} stays", text)
+
+    def test_the_chocolatey_package_is_rendered_and_copied(self):
+        written = release.render_channel("tool", "chocolatey", self.SUMS, "out", repo="org/tool")
+        self.assertEqual(sorted(str(p.relative_to("out")) for p in written),
+                         ["tool.nuspec", "tools/LICENSE.txt", "tools/chocolateyinstall.ps1"])
+        script = Path("out/tools/chocolateyinstall.ps1").read_text()
+        self.assertIn("${env:TEMP}", script, "PowerShell's own ${env:...} is left alone")
+        self.assertIn(f"checksum64 = '{'c' * 64}'", script)
+
+    def test_a_placeholder_without_a_value_is_an_error(self):
+        Path("packaging/tool.rb.tmpl").write_text('sha256 "${sha256_riscv64gc_unknown_linux_gnu}"\n')
+        with self.assertRaisesRegex(ValueError, "no value for .*riscv64gc"):
+            release.render_channel("tool", "homebrew", self.SUMS, "out", repo="org/tool")
+
+    def test_the_gate_says_which_channels_are_due(self):
+        read = release.files_on_disk(Path.cwd())
+        outputs = release.gate_outputs("abc", release.load(read), release.load(read).packages, False,
+                                       output=os.devnull)
+        self.assertEqual((outputs["homebrew"], outputs["chocolatey"]), ("true", "true"))
+
+    def test_the_tap_gets_a_branch_and_a_pull_request(self):
+        sh(".", "git", "init", "-q", "--bare", "-b", "main", "tap.git")
+        sh(".", "git", "clone", "-q", "tap.git", "tap")
+        sh("tap", "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init")
+        sh("tap", "git", "push", "-q", "origin", "HEAD:main")
+        [formula] = release.render_channel("tool", "homebrew", self.SUMS, "out", repo="org/tool")
+        prs = []
+        url = release.update_tap("tap", formula, "org/homebrew-tap", "1.2.0", "https://example.invalid/r",
+                                 open_pr=lambda *args: prs.append(args) or "https://example.invalid/pr/1")
+        self.assertEqual(url, "https://example.invalid/pr/1")
+        self.assertEqual(prs[0][:4], ("org/homebrew-tap", "tool-1.2.0", "main", "tool 1.2.0"))
+        self.assertIn("class Tool", sh(".", "git", "--git-dir=tap.git", "show", "tool-1.2.0:Formula/tool.rb"))
+        # Once the tap has it, nothing is pushed again.
+        sh("tap", "git", "checkout", "-q", "main")
+        sh("tap", "git", "merge", "-q", "--ff-only", "tool-1.2.0")
+        self.assertIsNone(release.update_tap("tap", formula, "org/homebrew-tap", "1.2.0", "u",
+                                             open_pr=lambda *a: self.fail("no pull request")))
 
 
 class Timeout(unittest.TestCase):

@@ -46,6 +46,14 @@ provenance attestations for every asset). The template's `publish-github`
 job gains `id-token: write` and `attestations: write`; add them to an
 installed `release.yml` to use `attest`.
 
+**Homebrew and Chocolatey.** A `github` package takes `homebrew` (a
+formula rendered from a template and the release's checksums, attached to the
+release and proposed to a tap as a pull request) and `chocolatey` (a package
+rendered from a directory of templates, installed and tested on Windows, then
+pushed). The template gains the `publish-homebrew` and `publish-chocolatey`
+jobs, the gate the `homebrew` and `chocolatey` outputs, and `release.py` the
+`render` and `homebrew-tap` commands.
+
 **`prepare`.** Every artifact kind takes a `prepare` command, run in the
 build job before anything is built (for `maturin`, before maturin-action):
 generated files the build ships, or tools it needs.
