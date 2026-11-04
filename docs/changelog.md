@@ -38,6 +38,15 @@ want, run `install`, and open a PR.
 
 ### Unreleased
 
+**Open VSX is checked like the Marketplace.** A `vscode` package takes
+`open-vsx: true`: Open VSX is then part of its publication. The version is
+due until both registries have it, `preflight` skips the registry that
+already has it (so a re-run uploads only the missing one) and refuses an
+Open VSX upload without a token, and `verify` waits for
+`open-vsx.org/api/<publisher>/<name>/<version>` too. Add `open-vsx: true` to
+a package published to Open VSX: without it, the upload still happens when
+`OVSX_PAT` is set, with a warning, but is not checked.
+
 **Promote reviewed CI artifacts.** A new artifact kind, `ci-artifact`,
 publishes the files of a pinned GitHub Actions artifact unchanged instead of
 building them again: for releases that must ship exactly the bytes CI built

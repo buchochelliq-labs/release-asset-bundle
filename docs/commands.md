@@ -271,6 +271,13 @@ and writes three outputs:
 | `new_crate` | `true` if that list is not empty |
 | `existing_crate` | `true` if at least one selected crate already exists |
 
+For `vscode` it asks each registry separately and writes `uploads`: a JSON
+list of `{name, version, marketplace, open-vsx}`, `true` where that registry
+still lacks the version. A package with `open-vsx: true` that the Marketplace
+already lists is not refused while Open VSX lacks it: only the missing upload
+is made. With an Open VSX upload due and no `OVSX_PAT` in the environment, it
+refuses before anything is uploaded.
+
 ### `publish-crates`
 
 ```sh
@@ -314,7 +321,7 @@ What "served" means per registry:
 | `crates.io` | `crates.io/api/v1/crates/<name>/<version>` answers 200 |
 | `pypi` | `pypi.org/pypi/<name>/<version>/json` answers 200 |
 | `npm` | `registry.npmjs.org/<name>/<version>` answers 200 |
-| `vscode` | the Marketplace's extension query lists the version |
+| `vscode` | the Marketplace's extension query lists the version; with `open-vsx: true`, also `open-vsx.org/api/<publisher>/<name>/<version>` answers 200 |
 
 ### `consume`
 

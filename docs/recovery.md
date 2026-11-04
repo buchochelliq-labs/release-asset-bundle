@@ -83,9 +83,9 @@ that are still due, merge, and release the new versions.
   least one asset. If an upload stopped partway, a re-run does not upload the
   rest. Check the release's files against the build artifacts, and upload any
   missing ones (with their `.sha256`) with `gh release upload`.
-- **VS Code Marketplace:** the package counts as published once the
-  Marketplace lists the version. Open VSX is not checked; if only the Open VSX
-  upload failed, publish that `.vsix` to Open VSX by hand.
+- **VS Code Marketplace and Open VSX:** the package counts as published once
+  the Marketplace lists the version and, with `open-vsx: true`, Open VSX
+  serves it. A re-run uploads only to the registry still missing it.
 
 ## Case 3: the run is still going, or `tag` stopped waiting
 

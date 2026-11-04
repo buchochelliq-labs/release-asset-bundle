@@ -171,7 +171,7 @@ copy changes only by installing again.
 | [crates.io](registries/crates-io.md) | Trusted Publishing; a crate's first version uses a token | a `crates-io` environment; a `CARGO_REGISTRY_TOKEN` secret in it for new crates; a Trusted Publisher on each crate |
 | [PyPI](registries/pypi.md) | Trusted Publishing | a `pypi` environment; a (pending) trusted publisher on PyPI |
 | [npm](registries/npm.md) | Trusted Publishing (npm 11.5+), or a token | an `npm` environment; a trusted publisher on npmjs.com |
-| [VS Code Marketplace](registries/vscode.md) | `VSCE_PAT` (and `OVSX_PAT` for Open VSX) | both secrets in a `vscode-marketplace` environment |
+| [VS Code Marketplace](registries/vscode.md) | `VSCE_PAT` (and `OVSX_PAT` for a package with `open-vsx: true`) | both secrets in a `vscode-marketplace` environment |
 
 Trusted publishers name the workflow file `release.yml` and the environment.
 Keep both names, or change the publisher settings to match.

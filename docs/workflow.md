@@ -125,7 +125,8 @@ checks out the tagged commit, installs Python 3.12 and PyYAML, downloads every
 `release--*` artifact into `dist/` (not in a verify-only run), and runs its
 publish action.
 
-`publish-vscode` passes the `VSCE_PAT` and `OVSX_PAT` secrets.
+`publish-vscode` passes the `VSCE_PAT` and `OVSX_PAT` secrets (`OVSX_PAT` is
+needed for packages with `open-vsx: true`).
 
 ### `publish-crates`, `publish-npm`
 
