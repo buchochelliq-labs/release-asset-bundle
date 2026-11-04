@@ -1002,5 +1002,279 @@ class Sync(unittest.TestCase):
             self.assertTrue(text.startswith("# keep me") and 'version: "0.2.1"' in text)
 
 
+
+# ---------------------------------------------------------------------------
+# #20: a retry policy per channel, and finishing derived channels with `tag`
+
+class RetryPolicy(unittest.TestCase):
+    def test_every_registry_and_channel_has_a_policy(self):
+        self.assertEqual(set(release.RETRY), set(release.REGISTRIES) | set(release.CHANNEL_KEYS))
+        self.assertEqual({c: release.RETRY[c] for c in ("crates.io", "github", "homebrew", "chocolatey")},
+                         {"crates.io": "once", "github": "finish", "homebrew": "idempotent",
+                          "chocolatey": "until-accepted"})
+
+    def test_only_channels_that_may_run_again_and_are_not_done_are_pending(self):
+        tool = release.Package("tool", "github", "Cargo.toml", "1.2.0", github=(
+            ("chocolatey", {"package": "p"}), ("homebrew", {"tap": "o/t", "formula": "f.rb"})))
+        self.assertEqual(release.channels_of(tool), ["github", "homebrew", "chocolatey"])
+        self.assertEqual(release.channels_of(release.Package("core", "crates.io", "m", "0.1.0")), ["crates.io"])
+        states = {"homebrew": "proposed", "chocolatey": "rejected"}
+        self.assertEqual(release.pending_channels(tool, lambda p, c: states[c]), {"chocolatey": "rejected"})
+        states = {"homebrew": "due", "chocolatey": "submitted"}
+        self.assertEqual(release.pending_channels(tool, lambda p, c: states[c]), {"homebrew": "due"})
+
+
+class Fetch:
+    """A fake `http_status`: answers by URL, records what was asked."""
+
+    def __init__(self, answers):
+        self.answers, self.asked = answers, []
+
+    def __call__(self, url, data=None, headers=None):
+        self.asked.append(url)
+        for prefix, answer in self.answers.items():
+            if url.startswith(prefix):
+                return answer
+        return 404, b""
+
+
+class HomebrewState(unittest.TestCase):
+    settings = {"tap": "org/homebrew-tap", "formula": "packaging/tool.rb.tmpl"}
+    package = release.Package("tool", "github", "Cargo.toml", "1.2.0", "v{version}")
+    CONTENTS = "https://api.github.com/repos/org/homebrew-tap/contents/Formula/tool.rb"
+    PULLS = "https://api.github.com/repos/org/homebrew-tap/pulls?state=open&head=org%3Atool-1.2.0"
+
+    def formula(self, version):
+        text = f'class Tool < Formula\n  url "https://github.com/org/tool/releases/download/v{version}/x.tar.gz"\nend\n'
+        return 200, json.dumps({"content": __import__("base64").b64encode(text.encode()).decode()}).encode()
+
+    def state(self, answers, package=None):
+        fetch = Fetch(answers)
+        return release.homebrew_state(package or self.package, self.settings, fetch), fetch.asked
+
+    def test_the_default_branch_at_this_version_is_merged(self):
+        self.assertEqual(self.state({self.CONTENTS: self.formula("1.2.0")}), ("merged", [self.CONTENTS]))
+
+    def test_an_open_pull_request_from_the_release_branch_is_proposed(self):
+        state, asked = self.state({self.CONTENTS: self.formula("1.1.0"), self.PULLS: (200, b'[{"number": 3}]')})
+        self.assertEqual((state, asked), ("proposed", [self.CONTENTS, self.PULLS]))
+
+    def test_an_older_formula_and_no_pull_request_is_due(self):
+        self.assertEqual(self.state({self.CONTENTS: self.formula("11.2.0"), self.PULLS: (200, b"[]")})[0], "due")
+        self.assertEqual(self.state({})[0], "due", "no formula at all")
+
+    def test_a_prerelease_is_left_out_without_asking(self):
+        package = release.Package("tool", "github", "Cargo.toml", "1.2.0-rc.1", "v{version}")
+        self.assertEqual(self.state({}, package), ("prerelease", []))
+
+
+class ChocolateyState(unittest.TestCase):
+    URL = "https://community.chocolatey.org/api/v2/Packages(Id='onto-cli',Version='1.2.0')"
+    package = release.Package("tool", "github", "Cargo.toml", "1.2.0", "v{version}")
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.cwd = os.getcwd()
+        os.chdir(self.dir.name)
+        sh(".", "git", "init", "-q")
+        Path("packaging/choco/tools").mkdir(parents=True)
+        Path("packaging/choco/onto.nuspec.tmpl").write_text(
+            "<package><metadata><id>onto-cli</id><version>${version}</version></metadata></package>\n")
+        Path("packaging/choco/tools/chocolateyinstall.ps1.tmpl").write_text("# <id>not this</id>\n")
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        self.dir.cleanup()
+
+    def state(self, answer):
+        fetch = Fetch({self.URL: answer} if answer else {})
+        return release.chocolatey_state(self.package, {"package": "packaging/choco"}, fetch)
+
+    def entry(self, properties):
+        return 200, f"<entry><m:properties>{properties}</m:properties></entry>".encode()
+
+    def test_each_state_of_the_community_repository(self):
+        self.assertEqual(self.state(None), "due", "never pushed")
+        self.assertEqual(self.state(self.entry("<d:PackageStatus>Approved</d:PackageStatus>")), "listed")
+        self.assertEqual(self.state(self.entry("<d:PackageStatus>Exempted</d:PackageStatus>")), "listed")
+        self.assertEqual(self.state(self.entry("<d:PackageStatus>Submitted</d:PackageStatus>")), "submitted")
+        self.assertEqual(self.state(self.entry("<d:PackageStatus>Rejected</d:PackageStatus>")), "rejected")
+        self.assertEqual(self.state(self.entry('<d:IsApproved m:type="Edm.Boolean">false</d:IsApproved>')),
+                         "submitted")
+        self.assertEqual(self.state(self.entry("")), "listed", "served without a status: listed")
+
+    def test_moderation_counts_as_done_and_a_rejection_does_not(self):
+        self.assertIn("submitted", release.DONE)
+        self.assertNotIn("rejected", release.DONE)
+
+    def test_the_id_is_read_from_the_nuspec_at_a_commit(self):
+        sh(".", "git", "add", "-A")
+        sh(".", "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x")
+        commit = sh(".", "git", "rev-parse", "HEAD")
+        Path("packaging/choco/onto.nuspec.tmpl").write_text("<id>changed-since</id>\n")
+        self.assertEqual(release.chocolatey_id("packaging/choco", commit), "onto-cli")
+        self.assertEqual(release.chocolatey_id("packaging/choco"), "changed-since")
+        Path("packaging/choco/onto.nuspec.tmpl").write_text("<id>${name}</id>\n")
+        with self.assertRaisesRegex(ValueError, "a literal <id>"):
+            release.chocolatey_id("packaging/choco")
+
+
+DERIVED_CONFIG = """
+packages:
+  - name: core
+    registry: crates.io
+    manifest: crates/core/Cargo.toml
+    version: "0.1.0"
+  - name: tool
+    registry: github
+    manifest: crates/tool/Cargo.toml
+    version: "0.2.0"
+    artifacts: [{kind: rust-binary, bin: tool}]
+    homebrew: {tap: org/homebrew-tap, formula: packaging/tool.rb.tmpl}
+    chocolatey: {package: packaging/choco}
+"""
+
+
+class FinishChannels(Repo):
+    """A published github package whose Homebrew or Chocolatey is not done is
+    selected again for those channels only."""
+
+    def setUp(self):
+        super().setUp()
+        self.write({"release-kit.yml": DERIVED_CONFIG})
+        self.first = self.commit("channels")
+        self.states = {}
+        self.success = {"status": "completed", "conclusion": "success", "url": "u", "head_sha": self.first,
+                        "publish_started": True}
+
+    def channel_status(self, package, channel, commit):
+        return self.states.get(channel, "due")
+
+    def run_tag(self, **kw):
+        import contextlib
+        import io
+        waits, out = [], io.StringIO()
+        with contextlib.redirect_stdout(out):
+            release.tag(status=self.status, run=kw.pop("run", lambda tag: None), channel_status=self.channel_status,
+                        wait=lambda *a, **k: waits.append((a[0], [(p.name, c) for p, c in k.get("channels", [])])),
+                        **kw)
+        return waits, out.getvalue()
+
+    def gate(self):
+        out = Path(self.dir.name) / "out"
+        out.write_text("")
+        release.gate("release-0.2.0", status=self.status, output=out, channel_status=self.channel_status)
+        return dict(line.split("=", 1) for line in out.read_text().splitlines())
+
+    def publish_all(self):
+        self.published.update({("core", "0.1.0"), ("tool", "0.2.0")})
+
+    def test_a_first_release_waits_for_its_channels_too(self):
+        waits, _ = self.run_tag()
+        self.assertEqual(waits, [("release-0.2.0", [("tool", "homebrew"), ("tool", "chocolatey")])])
+
+    def test_the_gate_selects_a_published_package_for_its_unfinished_channels(self):
+        self.run_tag()
+        self.publish_all()
+        self.states = {"homebrew": "due", "chocolatey": "submitted"}
+        outputs = self.gate()
+        selection = json.loads(outputs["selection"])
+        self.assertEqual([(s["name"], s["channels"]) for s in selection], [("tool", ["homebrew"])])
+        self.assertEqual({k: outputs[k] for k in ("github", "crates-io", "homebrew", "chocolatey")},
+                         {"github": "false", "crates-io": "false", "homebrew": "true", "chocolatey": "false"})
+        # publish-github and the build skip it: its files are already out.
+        self.assertEqual(release.selected("github", outputs["selection"]), [])
+        self.assertEqual(release.plan(outputs["selection"], output=os.devnull), [])
+
+    def test_a_release_with_every_channel_done_is_not_selected(self):
+        self.run_tag()
+        self.publish_all()
+        self.states = {"homebrew": "proposed", "chocolatey": "listed"}
+        with self.assertRaisesRegex(RuntimeError, "already published"):
+            self.gate()
+
+    def test_an_unpublished_package_is_selected_with_every_channel(self):
+        self.run_tag()
+        self.published.add(("core", "0.1.0"))
+        selection = json.loads(self.gate()["selection"])
+        self.assertEqual([(s["name"], s["channels"]) for s in selection],
+                         [("tool", ["github", "homebrew", "chocolatey"])])
+        self.assertEqual([p.name for p in release.selected("github", json.dumps(selection))], ["tool"])
+
+    def test_tag_goes_back_and_pushes_the_release_tag_again_for_the_channels(self):
+        self.run_tag()
+        before = sh(self.work, "git", "ls-remote", str(self.remote), "refs/tags/release-0.2.0")
+        self.write({"README.md": "later\n"})
+        self.commit("docs")
+        self.publish_all()
+        self.states = {"chocolatey": "rejected"}
+        waits, out = self.run_tag(run=lambda tag: self.success)
+        self.assertIn("release 0.2.0 is already tagged there", out)
+        self.assertIn("skip   core-v0.1.0", out)
+        self.assertIn("finish tool-v0.2.0: tool 0.2.0 (github) is published; homebrew is due (idempotent), "
+                      "chocolatey is rejected (until-accepted)", out)
+        self.assertIn("retag  release-0.2.0: its run ended success", out)
+        self.assertEqual(waits, [("release-0.2.0", [("tool", "homebrew"), ("tool", "chocolatey")])])
+        tags = self.remote_tags()
+        self.assertEqual(tags["release-0.2.0"], self.first, "on the release's commit, not HEAD")
+        self.assertNotEqual(sh(self.work, "git", "ls-remote", str(self.remote), "refs/tags/release-0.2.0"),
+                            before, "a new tag object, which starts a new run")
+        message = sh(self.work, "git", "for-each-ref", "refs/tags/release-0.2.0", "--format=%(contents)")
+        self.assertIn("tool 0.2.0 (github): homebrew, chocolatey", message)
+
+    def test_a_finished_release_is_left_alone(self):
+        self.run_tag()
+        self.publish_all()
+        self.states = {"homebrew": "merged", "chocolatey": "submitted"}
+        waits, out = self.run_tag(run=lambda tag: self.success)
+        self.assertEqual(waits, [])
+        self.assertIn("skip   tool-v0.2.0", out)
+        self.assertIn("Every package of release 0.2.0 is published.", out)
+
+    def test_a_newer_release_on_head_is_not_held_back_by_an_older_ones_channels(self):
+        self.run_tag()
+        self.publish_all()
+        self.write({"release-kit.yml": DERIVED_CONFIG.replace('"0.2.0"', '"0.3.0"'),
+                    "crates/tool/Cargo.toml": FILES["crates/tool/Cargo.toml"].replace("0.2.0", "0.3.0")})
+        head = self.commit("bump tool")
+        waits, out = self.run_tag(run=lambda tag: self.success)
+        self.assertIn("note   release 0.2.0 has channels not done", out)
+        self.assertIn("run `tag --release 0.2.0` to finish them", out)
+        self.assertEqual(self.remote_tags()["release-0.3.0"], head)
+        self.assertEqual(waits[0][0], "release-0.3.0")
+
+    def test_status_shows_each_channel_and_its_policy(self):
+        self.run_tag()
+        self.published.add(("tool", "0.2.0"))
+        self.states = {"homebrew": "proposed", "chocolatey": "submitted"}
+        lines = release.status_lines(status=self.status, channel_status=self.channel_status)
+        self.assertEqual([line.split() for line in lines[-2:]],
+                         [["homebrew", "idempotent", "proposed"], ["chocolatey", "until-accepted", "submitted"]])
+
+
+class WaitForChannels(unittest.TestCase):
+    package = release.Package("tool", "github", "Cargo.toml", "1.2.0", "v{version}")
+    done = {"status": "completed", "conclusion": "success", "url": "u", "head_sha": "x", "publish_started": True}
+
+    def wait(self, states):
+        import contextlib
+        import io
+        sleeps, out = [], io.StringIO()
+        answers = iter(states)
+        with contextlib.redirect_stdout(out):
+            release.wait_for("release-1.2.0", [self.package], 3600, status=lambda p: True, run=lambda t: self.done,
+                             sleep=sleeps.append, channels=[(self.package, "homebrew")],
+                             channel_status=lambda p, c: next(answers), settle=3)
+        return len(sleeps), out.getvalue()
+
+    def test_a_channel_that_becomes_done_is_waited_for(self):
+        self.assertEqual(self.wait(["due", "proposed"])[0], 1)
+
+    def test_one_never_done_is_named_and_does_not_hold_tag_for_hours(self):
+        sleeps, out = self.wait(["due"] * 4)
+        self.assertEqual(sleeps, 3)
+        self.assertIn("note   homebrew of tool 1.2.0 (github) is due, not done", out)
+
+
 if __name__ == "__main__":
     unittest.main()

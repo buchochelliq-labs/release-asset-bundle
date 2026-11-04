@@ -63,7 +63,7 @@ runs:
               case "$file" in *.sha256) ;; *) echo "$file" >> "$subjects" ;; esac
             done
           fi
-        done < <(jq -r '.[] | select(.registry == "github") | "\(.name)\t\(.slug)"' <<<"$SELECTION")
+        done < <(jq -r '.[] | select(.registry == "github" and ((.channels // ["github"]) | index("github")) != null) | "\(.name)\t\(.slug)"' <<<"$SELECTION")
         echo "root=$root" >> "$GITHUB_OUTPUT"
         echo "attest=$attest" >> "$GITHUB_OUTPUT"
         {
@@ -102,14 +102,14 @@ runs:
         }
         if [ "$VERIFY_ONLY" = true ]; then
           python3 "$kit" verify --registry github --selection "$SELECTION"
-          jq -r '.[] | select(.registry == "github") | "\(.name)\t\(.tag)"' <<<"$SELECTION" |
+          jq -r '.[] | select(.registry == "github" and ((.channels // ["github"]) | index("github")) != null) | "\(.name)\t\(.tag)"' <<<"$SELECTION" |
           while IFS=$'\t' read -r name tag; do
             sums="$(python3 "$kit" github-release --name "$name" --stage "$(mktemp -d)" --notes-out /dev/null --options-only | jq -r .checksums)"
             check_release "$tag" "$sums"
           done
           exit 0
         fi
-        jq -r '.[] | select(.registry == "github") | "\(.name)\t\(.version)\t\(.tag)\t\(.slug)"' <<<"$SELECTION" |
+        jq -r '.[] | select(.registry == "github" and ((.channels // ["github"]) | index("github")) != null) | "\(.name)\t\(.version)\t\(.tag)\t\(.slug)"' <<<"$SELECTION" |
         while IFS=$'\t' read -r name version tag slug; do
           shape="$(cat "$ROOT/$slug/shape.json")"
           notes=(--generate-notes)

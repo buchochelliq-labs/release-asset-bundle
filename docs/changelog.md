@@ -38,6 +38,26 @@ want, run `install`, and open a PR.
 
 ### Unreleased
 
+**Retry policy per channel; `tag` finishes Homebrew and Chocolatey.** Each
+channel has a retry policy defined by release-kit: `once` for crates.io, PyPI,
+npm and the VS Code Marketplace, `finish` for GitHub Releases, `idempotent`
+for a Homebrew tap and `until-accepted` for Chocolatey. The derived channels
+now have a state, read live: Homebrew is done when the tap's default branch
+has the formula at the version or a pull request from `<name>-<version>` is
+open; Chocolatey when the community API lists the version or it is in
+moderation. When a `github` package is published but one of its channels is
+not done, `tag` goes back to its commit (`finish <tag>`) and pushes the
+release tag again, and the gate selects the package for that channel only:
+each selection entry gains `channels`, the gate's `github` flag is false for
+it, and `homebrew`/`chocolatey` are true only when that channel is due. `tag`
+also waits briefly for a release's channels and names any not done.
+`status` prints each channel's policy and state. **Update an installed
+`release.yml`:** give `publish-homebrew` and `publish-chocolatey` `needs:
+[gate, ci, build, publish-github]` and let them run when `publish-github` was
+skipped because nothing was due on GitHub (copy the two `if:` conditions from
+`templates/release.yml`); without that, a run that only finishes a channel
+publishes nothing. See [the retry policy](recovery.md#what-each-channel-allows-again-the-retry-policy).
+
 **Promote reviewed CI artifacts.** A new artifact kind, `ci-artifact`,
 publishes the files of a pinned GitHub Actions artifact unchanged instead of
 building them again: for releases that must ship exactly the bytes CI built

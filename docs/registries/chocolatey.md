@@ -57,5 +57,18 @@ The template's `publish-chocolatey` job runs on `windows-latest` after
 
 Each version then goes through Chocolatey's automated checks, and a new
 package through human moderation, before it is listed. While a version is in
-moderation, Chocolatey refuses newer ones with `403 Forbidden`: re-run the job
-once the earlier one is approved.
+moderation, Chocolatey refuses newer ones with `403 Forbidden`: run
+`release.py tag` again once the earlier one is approved.
+
+## Finishing it later
+
+Chocolatey is `until-accepted`: a version can be pushed again until the
+community repository has it. `release.py` reads the version's state from
+`https://community.chocolatey.org/api/v2/Packages(Id='<id>',Version='<version>')`,
+with `<id>` from the package's `.nuspec`: `listed` (approved), `submitted` (in
+its checks or moderation), `rejected`, or `due` (never pushed). Listed and
+submitted count as done, so `tag` does not wait days for moderation; a
+rejected or unpushed version is due. Fix the cause and run `release.py tag`:
+it pushes the release tag again with only `chocolatey` due for the package,
+and `publish-chocolatey` runs while `publish-github` is skipped. See
+[the retry policy](../recovery.md#what-each-channel-allows-again-the-retry-policy).
