@@ -10,6 +10,12 @@ name: release-kit build
 # Building needs no credentials, except that a ci-artifact job reads this
 # repository's CI artifacts (actions: read); publishing stays in release.yml's
 # own jobs.
+#
+# Each job checks out a record tag the gate checked (a package's
+# `<name> <version>` tag, on the tagged commit) and stops before anything from
+# it runs unless the tag still names `sha`: what is built is the commit the
+# gate found on the default branch, and a tag moved during the run builds
+# nothing. Nothing here writes to the Actions cache (see docs/workflow.md).
 
 on:
   workflow_call:
@@ -34,10 +40,22 @@ jobs:
       jobs: ${{ steps.plan.outputs.jobs }}
       count: ${{ steps.plan.outputs.count }}
     steps:
+      # The first selected package's record tag; the gate put it on `sha`.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.sha }}
+          ref: refs/tags/${{ fromJSON(inputs.selection)[0].tag }}
           persist-credentials: false
+      - name: Check the tag still names the gated commit
+        shell: bash
+        env:
+          TAG: ${{ fromJSON(inputs.selection)[0].tag }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          at=$(git rev-parse HEAD)
+          if [ "$at" != "$SHA" ]; then
+            echo "::error::$TAG is at $at, not $SHA, the commit the gate checked; nothing is built"
+            exit 1
+          fi
       - id: plan
         uses: ./.github/release-kit/plan
         with:
@@ -53,10 +71,22 @@ jobs:
         include: ${{ fromJSON(needs.plan.outputs.jobs) }}
     runs-on: ${{ matrix.os }}
     steps:
+      # This package's record tag, checked as in `plan`.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.sha }}
+          ref: refs/tags/${{ matrix.tag }}
           persist-credentials: false
+      - name: Check the tag still names the gated commit
+        shell: bash
+        env:
+          TAG: ${{ matrix.tag }}
+          SHA: ${{ inputs.sha }}
+        run: |
+          at=$(git rev-parse HEAD)
+          if [ "$at" != "$SHA" ]; then
+            echo "::error::$TAG is at $at, not $SHA, the commit the gate checked; nothing is built"
+            exit 1
+          fi
       - uses: ./.github/release-kit/build
         with:
           job: ${{ toJSON(matrix) }}
