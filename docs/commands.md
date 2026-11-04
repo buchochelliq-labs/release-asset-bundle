@@ -316,6 +316,34 @@ What "served" means per registry:
 | `npm` | `registry.npmjs.org/<name>/<version>` answers 200 |
 | `vscode` | the Marketplace's extension query lists the version |
 
+### `record`
+
+```sh
+release.py record --tag TAG [--sha SHA] [--selection JSON] [--verify-only true|false]
+                  [--needs JSON] [--dist DIR] [--out FILE]
+release.py record --schema
+```
+
+| Option | Default | Meaning |
+|---|---|---|
+| `--tag` | | the release tag the run was for |
+| `--sha` | the tag's commit | the gate's `sha` output (empty when the gate failed) |
+| `--selection` | none | the gate's `selection` output |
+| `--verify-only` | `false` | the gate's `verify-only` output |
+| `--needs` | `{}` | the job's `toJSON(needs)`: each job's `result` |
+| `--dist` | `dist` | where the `release--*` build artifacts were downloaded |
+| `--out` | `release-record.json` | the file to write |
+| `--schema` | | print the record's JSON Schema and stop |
+
+Writes the run's [release record](release-record.md): every package of
+`release-kit.yml` at the commit, whether the gate selected it, its publish
+job's result, its outcome, its registry URL and the SHA-256 of the files built
+for it. A selected package whose publish job did not succeed is looked up on
+its registry, as `verify` does. It checks the record against its schema,
+prints one line per package (also to the job summary), and refuses if a
+selected package's publish job is not in `--needs`, or a built file does not
+match its `.sha256`.
+
 ### `consume`
 
 ```sh

@@ -38,6 +38,22 @@ want, run `install`, and open a PR.
 
 ### Unreleased
 
+**A machine-readable release record.** Every release run uploads the artifact
+`release-record`, holding `release-record.json`: the release, its tag and
+commit, the run, each job's result, and every package's outcome
+(`published`, `already-published`, `failed`, `skipped` or `unknown`), its
+registry URL and the SHA-256 of the files built for it, with an overall
+`result` (`complete`, `partial`, `nothing-published`). A coordinator
+releasing a project across repositories downloads it with `gh run download
+<run> -n release-record`. A new last job in the template, `record`, writes it
+with the new `release.py record` command, even when publishing fails, with no
+new permissions. The record is versioned (`schema_version: 1`), and its JSON
+Schema is published as
+[`release-record.schema.json`](release-record.schema.json). **Installed
+repositories must add the `record` job to their `release.yml`**: `install`
+does not change an existing one. Copy it from `templates/release.yml`. See
+[The release record](release-record.md).
+
 **Promote reviewed CI artifacts.** A new artifact kind, `ci-artifact`,
 publishes the files of a pinned GitHub Actions artifact unchanged instead of
 building them again: for releases that must ship exactly the bytes CI built

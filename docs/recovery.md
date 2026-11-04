@@ -11,6 +11,10 @@ python3 .github/release-kit/scripts/release.py tag --dry-run   # see what it wou
 python3 .github/release-kit/scripts/release.py tag
 ```
 
+Every run's [release record](release-record.md) says what it published:
+`gh run download <run> -n release-record`, then look at each package's
+`outcome`.
+
 ## What `tag` can prove: `dead()`
 
 Moving a tag is safe only if nothing was published from it. `tag` moves a tag

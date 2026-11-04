@@ -20,7 +20,7 @@ jobs:
           python-version: "3.11"   # the oldest Python release.py supports
       - name: Unit tests
         run: |
-          python3 -m pip install --quiet pyyaml
+          python3 -m pip install --quiet pyyaml jsonschema   # jsonschema: the release record against its published schema
           git config --global user.name ci
           git config --global user.email ci@example.invalid
           python3 -m unittest discover -s tests -v
