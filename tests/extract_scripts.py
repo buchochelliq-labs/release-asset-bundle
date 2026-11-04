@@ -11,6 +11,7 @@ out = Path(sys.argv[1])
 out.mkdir(parents=True, exist_ok=True)
 for action in sorted(Path(__file__).resolve().parent.parent.glob("*/action.yml")):
     for index, step in enumerate(yaml.safe_load(action.read_text())["runs"]["steps"]):
-        if "run" in step:
+        # Bash only: shellcheck cannot read PowerShell (`shell: pwsh`).
+        if "run" in step and step.get("shell", "bash") == "bash":
             body = re.sub(r"\$\{\{[^}]*\}\}", "X", step["run"])
             (out / f"{action.parent.name}-{index}.sh").write_text("#!/usr/bin/env bash\n" + body)

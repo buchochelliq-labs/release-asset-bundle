@@ -11,6 +11,14 @@ five:
 | `npm` | [npm](npm.md) | from source | Trusted Publishing, or a token | `npm` |
 | `vscode` | [VS Code Marketplace](vscode.md), and Open VSX | built artifacts | personal access tokens | `vscode-marketplace` |
 
+Two more channels are made from a `github` package's release once it is out,
+set on that package rather than as a `registry`:
+
+| Setting | Where | Publishes | Credential | Environment |
+|---|---|---|---|---|
+| `homebrew` | [a Homebrew tap](homebrew.md) | a formula, as a pull request on the tap | a token for the tap | `homebrew` |
+| `chocolatey` | [Chocolatey](chocolatey.md) | a package that installs the release's archive | an API key | `chocolatey` |
+
 Every publish action follows the same steps:
 
 1. **preflight**: refuse any selected version already on the registry

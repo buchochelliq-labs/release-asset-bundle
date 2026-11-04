@@ -39,9 +39,21 @@ Commands (the gate action, in CI):
     plan --selection JSON
                 the build matrix: one job per artifact (and target) of the
                 selected packages. Writes `jobs` and `count` to GITHUB_OUTPUT.
+    prepare --job JSON
+                run the job's artifact's `prepare` command, before building.
     build --job JSON
                 build one planned job into dist/, with a .sha256 per file for
                 GitHub Releases.
+    github-release --name NAME --stage DIR --notes-out FILE
+                shape a github package's release as release-kit.yml says:
+                write its `checksums` file into DIR, its `notes` into FILE,
+                and print what the publish action should do (JSON).
+
+    render --name NAME --channel homebrew|chocolatey --sums FILE --out DIR
+                render a github package's Homebrew formula or Chocolatey
+                package from its templates and its release's checksums.
+    homebrew-tap --tap DIR --formula FILE --repo OWNER/TAP --version V --release-url URL
+                put the formula on a branch of the tap and open a pull request.
 
 Commands (installing):
     install     from a release-kit checkout, copy the kit into the repository
@@ -68,6 +80,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import posixpath
 from pathlib import Path, PurePosixPath
 import re
 import shutil
@@ -123,6 +136,8 @@ class Package:
     tag_format: str = "{name}-v{version}"
     paths: tuple = ()
     artifacts: tuple = field(default=(), compare=False, hash=False)
+    # `github` packages only: how the GitHub release is made (GITHUB_OPTIONS).
+    github: tuple = field(default=(), compare=False, hash=False)
 
     @property
     def slug(self):
@@ -190,15 +205,62 @@ def load(read):
         artifacts = entry.get("artifacts") or []
         if not isinstance(artifacts, list) or not all(isinstance(a, dict) for a in artifacts):
             raise ValueError(f"{entry['name']}: artifacts must be a list of mappings")
+        options = {key: entry[key] for key in GITHUB_OPTIONS if key in entry}
         packages.append(Package(entry["name"], entry["registry"], entry["manifest"], entry["version"],
                                 entry.get("tag", "{name}-v{version}"), tuple(entry.get("paths") or ()),
-                                tuple(artifacts)))
+                                tuple(artifacts), tuple(sorted(options.items()))))
     settings = data.get("release") or {}
     name_from = settings.get("name_from", packages[-1].name)
     if name_from not in {p.name for p in packages}:
         raise ValueError(f"{CONFIG}: release.name_from = {name_from!r} is not a listed package")
     return Release(tuple(packages), name_from, settings.get("tag", "release-{release}"),
                    settings.get("branch", "main"))
+
+
+# The keys a `github` package takes to shape its release: `notes`, a command
+# whose output is the release's notes (else GitHub generates them);
+# `checksums`, the name of one file listing every asset's SHA-256; `attest`,
+# whether to attest the assets' build provenance. And the channels made from
+# the release once it is out: `homebrew` (a formula, and a pull request on a
+# tap) and `chocolatey` (a package pushed to the community repository).
+GITHUB_OPTIONS = ("notes", "checksums", "attest", "homebrew", "chocolatey")
+CHANNEL_KEYS = {
+    "homebrew": ({"tap", "formula"}, {"name"}),
+    "chocolatey": ({"package"}, {"test"}),
+}
+
+
+def github_option_errors(package):
+    """What is wrong with a package's GitHub release options, as messages."""
+    options = dict(package.github)
+    if options and package.registry != "github":
+        return [f"{package.name}: {', '.join(sorted(options))} only apply to a github package"]
+    errors = []
+    if "notes" in options and not (isinstance(options["notes"], str) and options["notes"].strip()):
+        errors.append(f"{package.name}: notes is a command that prints the release notes")
+    if "checksums" in options:
+        name = options["checksums"]
+        if not (isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", name)):
+            errors.append(f"{package.name}: checksums is a file name, e.g. SHA256SUMS")
+    if "attest" in options and not isinstance(options["attest"], bool):
+        errors.append(f"{package.name}: attest is true or false")
+    for channel, (required, optional) in CHANNEL_KEYS.items():
+        if channel not in options:
+            continue
+        settings = options[channel]
+        if not isinstance(settings, dict):
+            errors.append(f"{package.name}: {channel} is a mapping ({', '.join(sorted(required))})")
+            continue
+        if missing := required - settings.keys():
+            errors.append(f"{package.name}: {channel} needs {', '.join(sorted(missing))}")
+        if unknown := settings.keys() - required - optional:
+            errors.append(f"{package.name}: {channel} does not take {', '.join(sorted(unknown))}")
+        if not all(isinstance(v, str) and v.strip() for v in settings.values()):
+            errors.append(f"{package.name}: {channel}'s settings are text")
+        tap = settings.get("tap") if channel == "homebrew" else None
+        if isinstance(tap, str) and not re.fullmatch(r"[\w.-]+/[\w.-]+", tap):
+            errors.append(f"{package.name}: homebrew tap is owner/repository, e.g. org/homebrew-tap")
+    return errors
 
 
 def version_key(version):
@@ -224,12 +286,42 @@ def _cargo(read, path):
     return package.get("name"), version, deps
 
 
+def maturin_manifest(read, path):
+    """The Cargo.toml maturin builds a pyproject.toml from: `[tool.maturin]
+    manifest-path` (relative to the pyproject's directory), else the
+    Cargo.toml beside it. Returns (path from the repository root, whether
+    pyproject.toml names it)."""
+    data = tomllib.loads(read(path))
+    parent = PurePosixPath(path).parent
+    named = data.get("tool", {}).get("maturin", {}).get("manifest-path")
+    if named:
+        return str(PurePosixPath(posixpath.normpath(str(parent / named)))), True
+    return str(parent / "Cargo.toml"), False
+
+
+def pep440(version):
+    """A Cargo version as maturin writes it into a wheel: 1.0.0-rc.1 -> 1.0.0rc1."""
+    core, _, pre = version.partition("-")
+    if not pre:
+        return version
+    match = re.fullmatch(r"(alpha|beta|rc|a|b|c)\.?(\d+)", pre)
+    if not match:
+        return version
+    label = {"alpha": "a", "beta": "b", "c": "rc"}.get(match[1], match[1])
+    return f"{core}{label}{match[2]}"
+
+
 def _pyproject(read, path):
     data = tomllib.loads(read(path))
     project = data.get("project") or data.get("tool", {}).get("poetry", {})
     deps = {re.split(r"[\s<>=!~;\[(]", d, maxsplit=1)[0] for d in project.get("dependencies", [])
             if isinstance(d, str)}
-    return project.get("name"), project.get("version"), deps
+    version = project.get("version")
+    if version is None and "version" in project.get("dynamic", []) and "maturin" in data.get("tool", {}):
+        # maturin takes a dynamic version from the crate it builds.
+        cargo_version = _cargo(read, maturin_manifest(read, path)[0])[1]
+        version = pep440(cargo_version) if cargo_version else None
+    return project.get("name"), version, deps
 
 
 def _package_json(read, path, vscode=False):
@@ -287,6 +379,7 @@ def check(read):
             errors.append(f"{package.name}: {package.manifest} names the package {name!r}")
     for package in release.packages:
         errors.extend(artifact_errors(package))
+        errors.extend(github_option_errors(package))
     # Each package after the listed packages of its own registry it depends on.
     position = {(p.registry, p.name): i for i, p in enumerate(release.packages)}
     for package in release.packages:
@@ -386,6 +479,10 @@ def published_on(package):
 RUNNERS = {
     "x86_64-unknown-linux-gnu": "ubuntu-latest",
     "aarch64-unknown-linux-gnu": "ubuntu-24.04-arm",
+    # Static Linux binaries; each is built natively (the build action installs
+    # musl-tools for a rust-binary, maturin-action builds wheels in its containers).
+    "x86_64-unknown-linux-musl": "ubuntu-latest",
+    "aarch64-unknown-linux-musl": "ubuntu-24.04-arm",
     "aarch64-apple-darwin": "macos-latest",
     "x86_64-apple-darwin": "macos-latest",
     "x86_64-pc-windows-msvc": "windows-latest",
@@ -395,11 +492,11 @@ DEFAULT_TARGETS = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu", "aar
                    "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]
 # kind: (registries it can feed, required fields, optional fields)
 KINDS = {
-    "rust-binary": ({"github"}, {"bin"}, {"crate", "targets", "include", "test"}),
-    "python": ({"pypi", "github"}, set(), {"dir", "test"}),
-    "maturin": ({"pypi", "github"}, set(), {"targets", "sdist", "test"}),
-    "vsix": ({"vscode", "github"}, set(), {"dir", "test"}),
-    "command": ({"github", "pypi", "vscode"}, {"run", "outputs"}, {"os", "test"}),
+    "rust-binary": ({"github"}, {"bin"}, {"crate", "targets", "include", "test", "prepare"}),
+    "python": ({"pypi", "github"}, set(), {"dir", "test", "prepare"}),
+    "maturin": ({"pypi", "github"}, set(), {"targets", "sdist", "test", "prepare"}),
+    "vsix": ({"vscode", "github"}, set(), {"dir", "test", "prepare"}),
+    "command": ({"github", "pypi", "vscode"}, {"run", "outputs"}, {"os", "test", "prepare"}),
 }
 # Registries that publish from source need no artifacts; the others do.
 FROM_SOURCE = {"crates.io", "npm"}
@@ -459,6 +556,8 @@ def artifact_errors(package):
             errors.append(f"{where}: test is a command, or {{run: ..., targets: [...]}}")
         elif isinstance(test, dict) and test.get("targets") and kind not in ("rust-binary", "maturin"):
             errors.append(f"{where}: {kind} is not built per target; give test as a command")
+        if "prepare" in artifact and not (isinstance(artifact["prepare"], str) and artifact["prepare"].strip()):
+            errors.append(f"{where}: prepare is a command")
         if kind in ("rust-binary", "maturin"):
             for target, runner in targets_of(artifact):
                 if not runner:
@@ -484,6 +583,7 @@ def plan(selection, read=None, output=None):
                 "registry": package.registry, "manifest": package.manifest}
         for index, artifact in enumerate(package.artifacts):
             kind = artifact["kind"]
+            base["prepare"] = artifact.get("prepare") or ""
             if kind == "rust-binary":
                 crate = artifact.get("crate") or manifest_info(read or files_on_disk(), package)[0]
                 for target, runner in targets_of(artifact):
@@ -492,14 +592,18 @@ def plan(selection, read=None, output=None):
                                  "include": list(artifact.get("include") or []),
                                  "test": test_of(artifact, target)})
             elif kind == "maturin":
-                # maturin builds from the crate beside pyproject.toml.
-                cargo = str(PurePosixPath(package.manifest).parent / "Cargo.toml")
+                # maturin builds from the crate beside pyproject.toml, or the one its
+                # [tool.maturin] manifest-path names: then maturin runs in the
+                # pyproject's directory and finds it itself (`cargo` is empty).
+                cargo, named = maturin_manifest(read or files_on_disk(), package.manifest)
+                directory = str(PurePosixPath(package.manifest).parent)
+                where = {"cargo": "", "dir": directory} if named else {"cargo": cargo, "dir": "."}
                 for target, runner in targets_of(artifact):
                     jobs.append({**base, "id": job_id(package.slug, kind, target), "kind": kind, "os": runner,
-                                 "target": target, "cargo": cargo, "test": test_of(artifact, target)})
+                                 "target": target, **where, "test": test_of(artifact, target)})
                 if artifact.get("sdist", True):
                     jobs.append({**base, "id": job_id(package.slug, "sdist"), "kind": "maturin-sdist",
-                                 "os": "ubuntu-latest", "target": "", "cargo": cargo, "test": None})
+                                 "os": "ubuntu-latest", "target": "", **where, "test": None})
             elif kind in ("python", "vsix"):
                 directory = artifact.get("dir") or str(PurePosixPath(package.manifest).parent)
                 jobs.append({**base, "id": job_id(package.slug, kind, index), "kind": kind,
@@ -550,6 +654,177 @@ def archive_binary(binary, name, include, out, windows):
     return target
 
 
+def prepare(job):
+    """Run an artifact's `prepare` command before it is built (the build action
+    calls this before maturin-action, which builds wheels by itself)."""
+    job = json.loads(job) if isinstance(job, str) else job
+    if command := job.get("prepare"):
+        run(command, shell=True, env={"VERSION": job["version"], "PACKAGE": job["package"],
+                                      "TARGET": job.get("target", "")})
+
+
+def github_release(name, stage, notes_out, read=None, runner=None, options_only=False):
+    """Shape a `github` package's release from release-kit.yml: write its
+    `checksums` file into `stage` (over every file there but the `.sha256`
+    ones), and run its `notes` command into `notes_out`. Returns
+    {"notes": bool, "attest": bool, "checksums": name or ""}; with
+    `options_only`, only returns it (a verify-only run)."""
+    release = load(read or files_on_disk())
+    package = next((p for p in release.packages if p.registry == "github" and p.name == name), None)
+    if package is None:
+        raise ValueError(f"{CONFIG} has no github package {name!r}")
+    options = dict(package.github)
+    stage = Path(stage)
+    sums = options.get("checksums") or ""
+    shape = {"notes": bool(options.get("notes")), "attest": options.get("attest") is True, "checksums": sums,
+             "homebrew": dict(options.get("homebrew") or {}), "chocolatey": dict(options.get("chocolatey") or {})}
+    if options_only:
+        return shape
+    if sums:
+        files = sorted(p for p in stage.iterdir()
+                       if p.is_file() and not p.name.endswith(".sha256") and p.name != sums)
+        if not files:
+            raise RuntimeError(f"{name}: no files in {stage} to list in {sums}")
+        lines = [f"{hashlib.sha256(p.read_bytes()).hexdigest()}  {p.name}\n" for p in files]
+        (stage / sums).write_text("".join(lines), encoding="utf-8")
+    if command := options.get("notes"):
+        result = (runner or subprocess.run)(
+            command, shell=True, check=True, text=True, capture_output=True,
+            executable=shutil.which("bash"),
+            env={**os.environ, "VERSION": package.version, "PACKAGE": package.name, "TAG": package.tag})
+        if not result.stdout.strip():
+            raise RuntimeError(f"{name}: the notes command printed nothing")
+        Path(notes_out).write_text(result.stdout, encoding="utf-8")
+    return shape
+
+
+# ---------------------------------------------------------------------------
+# Homebrew and Chocolatey: made from a published GitHub release
+
+# `${name}` placeholders only, so a template's own `$var`, `#{var}` or
+# PowerShell `${env:X}` is left alone.
+PLACEHOLDER = re.compile(r"\$\{([a-z0-9_]+)\}")
+SUM_LINE = re.compile(r"^([0-9a-f]{64}) [ *](\S+)$")
+
+
+def parse_sums(text):
+    """{file name: sha256} from `sha256sum` output (or .sha256 files, joined)."""
+    sums = {}
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        match = SUM_LINE.match(line.strip())
+        if not match:
+            raise ValueError(f"not a sha256sum line: {line!r}")
+        sums[PurePosixPath(match[2]).name] = match[1]
+    return sums
+
+
+def channel_values(package, sums, repo):
+    """The placeholders a template can use: `version`, `tag`, `repository`,
+    `base_url` (the release's download URL), and for each archive of a
+    rust-binary (`<bin>-v<version>-<target>.tar.gz|.zip`) `url_<target>` and
+    `sha256_<target>`, with the target's `-` as `_`."""
+    base = f"https://github.com/{repo}/releases/download/{package.tag}"
+    values = {"version": package.version, "tag": package.tag, "repository": repo, "base_url": base}
+    archive = re.compile(rf"(.+?)-v{re.escape(package.version)}-([a-z0-9_]+(?:-[a-z0-9_]+){{2,3}})\.(?:tar\.gz|zip)")
+    for name, sha in sorted(sums.items()):
+        if match := archive.fullmatch(name):
+            key = match[2].replace("-", "_")
+            if f"sha256_{key}" in values:
+                raise ValueError(f"two archives for {match[2]}: name the one each template means")
+            values[f"sha256_{key}"] = sha
+            values[f"url_{key}"] = f"{base}/{name}"
+    return values
+
+
+def render_template(text, values, where):
+    """Fill every `${name}`; one without a value is an error, never left in."""
+    def fill(match):
+        if match[1] not in values:
+            raise ValueError(f"{where}: no value for ${{{match[1]}}} (there are: {', '.join(sorted(values))})")
+        return values[match[1]]
+    return PLACEHOLDER.sub(fill, text)
+
+
+def render_channel(name, channel, sums_text, out, read=None, repo=None):
+    """Render a github package's `homebrew` formula or `chocolatey` package
+    from its release's checksums into `out`. Returns the files written."""
+    release = load(read or files_on_disk())
+    package = next((p for p in release.packages if p.registry == "github" and p.name == name), None)
+    settings = dict(package.github).get(channel) if package else None
+    if not settings:
+        raise ValueError(f"{CONFIG}: github package {name!r} has no {channel}")
+    values = channel_values(package, parse_sums(sums_text), repo or repository())
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    if channel == "homebrew":
+        template = Path(settings["formula"])
+        formula = settings.get("name") or template.name.removesuffix(".tmpl").removesuffix(".rb")
+        target = out / f"{formula}.rb"
+        target.write_text(render_template(template.read_text(encoding="utf-8"), values, str(template)),
+                          encoding="utf-8")
+        return [target]
+    source = Path(settings["package"])
+    if not source.is_dir():
+        raise ValueError(f"{name}: chocolatey package {source} is not a directory")
+    written = []
+    for file in sorted(f for f in source.rglob("*") if f.is_file()):
+        relative = file.relative_to(source)
+        target = out / str(relative).removesuffix(".tmpl")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if file.name.endswith(".tmpl"):
+            target.write_text(render_template(file.read_text(encoding="utf-8"), values, str(file)),
+                              encoding="utf-8")
+        else:
+            shutil.copy2(file, target)
+        written.append(target)
+    if len([f for f in written if f.suffix == ".nuspec"]) != 1:
+        raise ValueError(f"{name}: chocolatey package {source} needs exactly one .nuspec (or .nuspec.tmpl)")
+    return written
+
+
+def open_tap_pr(repo, branch, base, title, body):
+    """Open (or find) the tap's pull request with the GitHub CLI."""
+    found = subprocess.run(["gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "open",
+                            "--json", "url", "--jq", '.[0].url // ""'],
+                           check=True, text=True, capture_output=True).stdout.strip()
+    if found:
+        return found
+    return subprocess.run(["gh", "pr", "create", "--repo", repo, "--base", base, "--head", branch,
+                           "--title", title, "--body", body],
+                          check=True, text=True, capture_output=True).stdout.strip()
+
+
+def update_tap(tap, formula, repo, version, release_url, open_pr=open_tap_pr):
+    """Put `formula` in the tap checkout `tap` as Formula/<file>, on the
+    branch `<formula name>-<version>`, and open a pull request for it.
+    Re-running replaces that branch and reuses the open pull request; a tap
+    that already has the formula is left alone. Returns the PR URL or None."""
+    tap, formula = Path(tap), Path(formula)
+    name = formula.stem
+    git_tap = lambda *args, **kw: git("-C", str(tap), *args, **kw)  # noqa: E731
+    base = git_tap("rev-parse", "--abbrev-ref", "HEAD")
+    (tap / "Formula").mkdir(exist_ok=True)
+    shutil.copy2(formula, tap / "Formula" / formula.name)
+    if not git_tap("status", "--porcelain", "--", f"Formula/{formula.name}"):
+        print(f"the tap's {base} already has {name} {version}", flush=True)
+        return None
+    branch = f"{name}-{version}"
+    git_tap("checkout", "--quiet", "-B", branch)
+    git_tap("add", f"Formula/{formula.name}")
+    git_tap("-c", "user.name=github-actions[bot]",
+            "-c", "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+            "commit", "--quiet", "-m", f"{name} {version}")
+    # The branch is the release's own, named for the version: a re-run replaces it.
+    git_tap("push", "--quiet", "--force", "origin", f"HEAD:refs/heads/{branch}")
+    url = open_pr(repo, branch, base, f"{name} {version}",
+                  f"The Homebrew formula for [{name} {version}]({release_url}), rendered by its release run "
+                  "(release-kit).")
+    print(f"tap pull request for {name} {version}: {url}", flush=True)
+    return url
+
+
 def run(command, cwd=None, env=None, shell=False):
     print(f"$ {command if shell else ' '.join(command)}", flush=True)
     # `command` artifacts run in bash everywhere (GitHub's Windows runners have Git's bash).
@@ -587,7 +862,14 @@ def build(job, out=Path("dist")):
         for path in Path().glob(job["outputs"]):
             if path.is_file() and path.resolve().parent != out:
                 shutil.copy2(path, out / path.name)
-    elif kind not in ("maturin", "maturin-sdist"):
+    elif kind in ("maturin", "maturin-sdist"):
+        # maturin-action wrote into <dir>/dist; collect what it left elsewhere.
+        built = Path(job.get("dir") or ".") / "dist"
+        if built.resolve() != out and built.is_dir():
+            for path in built.iterdir():
+                if path.is_file():
+                    shutil.copy2(path, out / path.name)
+    else:
         raise ValueError(f"unknown build kind {kind!r}")
     made = sorted(p for p in out.iterdir() if p not in before and not p.name.endswith(".sha256"))
     if kind in ("maturin", "maturin-sdist"):
@@ -819,6 +1101,10 @@ def gate_outputs(sha, release, chosen, verify_only, output=None):
     }
     for registry in REGISTRIES:
         outputs[registry.replace(".", "-")] = str(any(p.registry == registry for p in chosen)).lower()
+    # Channels made from a GitHub release: whether a selected github package has one.
+    for channel in CHANNEL_KEYS:
+        outputs[channel] = str(any(p.registry == "github" and dict(p.github).get(channel)
+                                   for p in chosen)).lower()
     target = output or os.environ.get("GITHUB_OUTPUT")
     if target:
         with open(target, "a", encoding="utf-8") as handle:
@@ -892,10 +1178,57 @@ def publish_groups(chosen, new):
     return groups
 
 
-def publish_crates(selection, new_crates, trusted_token, new_token, runner=None):
+# crates.io limits how many new crates one account publishes: a burst, then
+# one every few minutes. Its 429 says when to try again.
+RATE_LIMITED = re.compile(r"429|too many new crates|try again after", re.I)
+RETRY_AFTER = re.compile(r"try again after ([A-Z][a-z]{2}, \d{1,2} [A-Z][a-z]{2} \d{4} \d{2}:\d{2}:\d{2} GMT)")
+NEW_CRATE_WAIT = 600
+
+
+def run_capturing(command, env=None):
+    """`run`, also keeping what the command printed: a failure's
+    CalledProcessError carries it as `output`."""
+    print(f"$ {' '.join(command)}", flush=True)
+    result = subprocess.run(command, env={**os.environ, **(env or {})}, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    print(result.stdout, end="", flush=True)
+    if result.returncode:
+        raise subprocess.CalledProcessError(result.returncode, command, output=result.stdout)
+
+
+def rate_limit_wait(output, now=None):
+    """Seconds to wait before publishing another new crate, from crates.io's
+    429 message, or None if `output` is not a rate limit."""
+    if not RATE_LIMITED.search(output or ""):
+        return None
+    if match := RETRY_AFTER.search(output):
+        from email.utils import parsedate_to_datetime
+        at = parsedate_to_datetime(match[1]).timestamp()
+        return max(5, min(3600, at - (now or time.time()) + 5))
+    return NEW_CRATE_WAIT
+
+
+def publish_new_crate(crate, token, runner, sleep=time.sleep, tries=30):
+    """`cargo publish` one new crate, waiting out crates.io's new-crate rate
+    limit as often as it takes (a first release of many crates hits it)."""
+    for attempt in range(1, tries + 1):
+        try:
+            runner(["cargo", "publish", "--locked", "-p", crate], env={"CARGO_REGISTRY_TOKEN": token})
+            return
+        except subprocess.CalledProcessError as error:
+            wait = rate_limit_wait(error.output)
+            if wait is None or attempt == tries:
+                raise
+            print(f"crates.io rate-limits new crates: {crate} waits {int(wait)}s", flush=True)
+            sleep(wait)
+
+
+def publish_crates(selection, new_crates, trusted_token, new_token, runner=None, sleep=time.sleep):
     """Publish the selected crates: one `cargo publish --dry-run` for all of
-    them, then one `cargo publish` per run of crates sharing a credential.
+    them, then one `cargo publish` per run of crates already on crates.io,
+    and one per new crate (each waiting out the new-crate rate limit).
     Refuses before uploading anything if a group's token is missing."""
+    upload = runner or run_capturing
     runner = runner or run
     chosen = selected("crates.io", selection)
     new = set(json.loads(new_crates or "[]"))
@@ -911,8 +1244,12 @@ def publish_crates(selection, new_crates, trusted_token, new_token, runner=None)
     every = [arg for p in chosen for arg in ("-p", p.name)]
     runner(["cargo", "publish", "--dry-run", "--locked", *every], env={"CARGO_REGISTRY_TOKEN": ""})
     for credential, crates in groups:
-        runner(["cargo", "publish", "--locked", *[a for c in crates for a in ("-p", c)]],
-               env={"CARGO_REGISTRY_TOKEN": tokens[credential]})
+        if credential == "new":
+            for crate in crates:
+                publish_new_crate(crate, tokens["new"], upload, sleep)
+        else:
+            runner(["cargo", "publish", "--locked", *[a for c in crates for a in ("-p", c)]],
+                   env={"CARGO_REGISTRY_TOKEN": tokens[credential]})
     return groups
 
 
@@ -1298,6 +1635,24 @@ def main(argv=None):
                        help="select the release's published packages, to verify them again")
     planner = commands.add_parser("plan")
     planner.add_argument("--selection", required=True)
+    preparer = commands.add_parser("prepare")
+    preparer.add_argument("--job", required=True)
+    shaper = commands.add_parser("github-release")
+    shaper.add_argument("--name", required=True)
+    shaper.add_argument("--stage", required=True, help="the directory holding the release's files")
+    shaper.add_argument("--notes-out", required=True, help="where to write the notes, if the package has some")
+    shaper.add_argument("--options-only", action="store_true", help="only print what release-kit.yml says")
+    renderer = commands.add_parser("render")
+    renderer.add_argument("--name", required=True)
+    renderer.add_argument("--channel", required=True, choices=sorted(CHANNEL_KEYS))
+    renderer.add_argument("--sums", required=True, help="the release's checksums, in sha256sum format")
+    renderer.add_argument("--out", required=True)
+    tapper = commands.add_parser("homebrew-tap")
+    tapper.add_argument("--tap", required=True, help="a checkout of the tap")
+    tapper.add_argument("--formula", required=True)
+    tapper.add_argument("--repo", required=True, help="the tap, owner/name")
+    tapper.add_argument("--version", required=True)
+    tapper.add_argument("--release-url", required=True)
     builder = commands.add_parser("build")
     builder.add_argument("--job", required=True)
     builder.add_argument("--out", default="dist")
@@ -1334,6 +1689,17 @@ def main(argv=None):
             gate(args.tag, args.remote, verify_only=args.verify_only)
         elif args.command == "plan":
             plan(args.selection)
+        elif args.command == "prepare":
+            prepare(args.job)
+        elif args.command == "github-release":
+            print(json.dumps(github_release(args.name, args.stage, args.notes_out,
+                                            options_only=args.options_only)))
+        elif args.command == "render":
+            for path in render_channel(args.name, args.channel, Path(args.sums).read_text(encoding="utf-8"),
+                                       args.out):
+                print(path)
+        elif args.command == "homebrew-tap":
+            update_tap(args.tap, args.formula, args.repo, args.version, args.release_url)
         elif args.command == "build":
             build(args.job, Path(args.out))
         elif args.command == "install":

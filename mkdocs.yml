@@ -59,5 +59,7 @@ nav:
       - PyPI: registries/pypi.md
       - npm: registries/npm.md
       - VS Code Marketplace and Open VSX: registries/vscode.md
+      - Homebrew: registries/homebrew.md
+      - Chocolatey: registries/chocolatey.md
   - Migrating from rs-rich-cli: migrating-from-rs-rich-cli.md
   - Versions and changelog: changelog.md

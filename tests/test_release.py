@@ -441,6 +441,47 @@ class NewCrates(unittest.TestCase):
         self.assertEqual(len(calls), 2)
 
 
+class NewCrateRateLimit(unittest.TestCase):
+    """A first release of many crates waits out crates.io's new-crate limit."""
+    selection = json.dumps([
+        {"name": n, "registry": "crates.io", "version": "0.1.0", "manifest": f"crates/{n}/Cargo.toml",
+         "tag": f"{n}-v0.1.0"} for n in ("a", "b")])
+    LIMITED = ("error: failed to publish to registry at https://crates.io\n\nCaused by:\n  the remote server "
+               "responded with an error (status 429 Too Many Requests): You have published too many new crates "
+               "in a short period of time. Please try again after Wed, 04 Nov 2026 03:10:00 GMT and see "
+               "https://crates.io/docs/rate-limits for more details.\n")
+
+    def test_new_crates_publish_one_at_a_time_and_wait_when_limited(self):
+        calls, waits, fails = [], [], {"b": 2}
+
+        def runner(cmd, env):
+            calls.append(cmd)
+            crate = cmd[-1]
+            if "--dry-run" not in cmd and fails.get(crate):
+                fails[crate] -= 1
+                raise subprocess.CalledProcessError(101, cmd, output=self.LIMITED)
+
+        release.publish_crates(self.selection, json.dumps(["a", "b"]), "", "new-t", runner=runner,
+                               sleep=waits.append)
+        self.assertEqual([c[-1] for c in calls[1:]], ["a", "b", "b", "b"])
+        self.assertEqual(len(waits), 2)
+
+    def test_the_wait_comes_from_the_message(self):
+        from email.utils import parsedate_to_datetime
+        at = parsedate_to_datetime("Wed, 04 Nov 2026 03:10:00 GMT").timestamp()
+        self.assertEqual(release.rate_limit_wait(self.LIMITED, now=at - 100), 105)
+        self.assertEqual(release.rate_limit_wait("status 429 Too Many Requests"), release.NEW_CRATE_WAIT)
+        self.assertIsNone(release.rate_limit_wait("error: invalid token"))
+
+    def test_any_other_failure_stops_at_once(self):
+        def runner(cmd, env):
+            if "--dry-run" not in cmd:
+                raise subprocess.CalledProcessError(101, cmd, output="error: 403 Forbidden")
+        with self.assertRaises(subprocess.CalledProcessError):
+            release.publish_crates(self.selection, json.dumps(["a", "b"]), "", "new-t", runner=runner,
+                                   sleep=lambda s: self.fail("no wait for a refusal"))
+
+
 class Consumer(unittest.TestCase):
     """#6: a published package is used as a stranger would."""
     selection = json.dumps([
@@ -513,6 +554,206 @@ class ArtifactTests(unittest.TestCase):
                     release.build(job, Path(d) / "dist2")
             finally:
                 os.chdir(cwd)
+
+
+class MaturinFromCargo(unittest.TestCase):
+    """A pyproject.toml whose version maturin takes from a Cargo workspace."""
+
+    FILES = {
+        "Cargo.toml": '[workspace]\nmembers = ["crates/*"]\n[workspace.package]\nversion = "0.2.0-rc.1"\n',
+        "crates/cli/Cargo.toml": '[package]\nname = "cli"\nversion.workspace = true\n',
+        "pyproject.toml": '[project]\nname = "tool"\ndynamic = ["version"]\n'
+                          '[tool.maturin]\nbindings = "bin"\nmanifest-path = "crates/cli/Cargo.toml"\n',
+        "release-kit.yml": 'packages:\n  - name: tool\n    registry: pypi\n    manifest: pyproject.toml\n'
+                           '    version: "0.2.0rc1"\n    artifacts:\n      - kind: maturin\n'
+                           '        targets: [x86_64-unknown-linux-musl]\n        prepare: ./notices.sh\n',
+    }
+
+    def test_the_version_is_the_crates_as_pep_440(self):
+        self.assertEqual(release.check(reader(self.FILES)), [])
+        self.assertEqual(release.pep440("1.0.0"), "1.0.0")
+        self.assertEqual(release.pep440("1.0.0-beta.2"), "1.0.0b2")
+        files = {**self.FILES, "Cargo.toml": self.FILES["Cargo.toml"].replace("0.2.0-rc.1", "0.3.0")}
+        self.assertTrue(any("says 0.2.0rc1" in e and "says 0.3.0" in e for e in release.check(reader(files))))
+
+    def test_maturin_runs_where_pyproject_names_the_crate(self):
+        jobs = release.plan(json.dumps([{"name": "tool", "registry": "pypi"}]), read=reader(self.FILES))
+        self.assertEqual([(j["kind"], j["os"], j["cargo"], j["dir"]) for j in jobs],
+                         [("maturin", "ubuntu-latest", "", "."), ("maturin-sdist", "ubuntu-latest", "", ".")])
+        self.assertEqual({j["prepare"] for j in jobs}, {"./notices.sh"}, "prepared before every job")
+
+    def test_prepare_runs_with_the_job_described(self):
+        with tempfile.TemporaryDirectory() as d:
+            cwd = os.getcwd()
+            os.chdir(d)
+            try:
+                release.prepare({"package": "tool", "version": "1.0", "target": "x86_64-unknown-linux-musl",
+                                 "prepare": 'echo "$PACKAGE $VERSION $TARGET" > prepared'})
+                self.assertEqual(Path("prepared").read_text().strip(), "tool 1.0 x86_64-unknown-linux-musl")
+                release.prepare({"package": "tool", "version": "1.0", "prepare": ""})
+            finally:
+                os.chdir(cwd)
+
+    def test_a_blank_prepare_is_refused(self):
+        files = {**self.FILES, "release-kit.yml": self.FILES["release-kit.yml"].replace("./notices.sh", "''")}
+        self.assertTrue(any("prepare is a command" in e for e in release.check(reader(files))))
+
+
+class GitHubReleaseOptions(unittest.TestCase):
+    """A github package's notes, checksums file and attestations."""
+
+    def config(self, options):
+        return reader({
+            "bin/Cargo.toml": '[package]\nname = "app"\nversion = "1.0.0"\n',
+            "release-kit.yml": 'packages:\n  - name: app\n    registry: github\n    manifest: bin/Cargo.toml\n'
+                               '    version: "1.0.0"\n    tag: "v{version}"\n'
+                               '    artifacts: [{kind: rust-binary, bin: app}]\n' + options,
+        })
+
+    def test_options_are_checked(self):
+        self.assertEqual(release.check(self.config(
+            '    notes: ./notes.sh\n    checksums: SHA256SUMS\n    attest: true\n')), [])
+        cases = {
+            "    notes: ''\n": "notes is a command",
+            "    checksums: ../SUMS\n": "checksums is a file name",
+            "    attest: yes please\n": "attest is true or false",
+        }
+        for options, message in cases.items():
+            self.assertIn(message, "\n".join(release.check(self.config(options))), options)
+        crate = reader({"c/Cargo.toml": '[package]\nname = "c"\nversion = "1.0.0"\n',
+                        "release-kit.yml": 'packages:\n  - name: c\n    registry: crates.io\n'
+                                           '    manifest: c/Cargo.toml\n    version: "1.0.0"\n    attest: true\n'})
+        self.assertIn("only apply to a github package", "\n".join(release.check(crate)))
+
+    def test_the_release_is_shaped_from_its_options(self):
+        with tempfile.TemporaryDirectory() as d:
+            stage = Path(d) / "files"
+            stage.mkdir()
+            (stage / "app-v1.0.0-x.tar.gz").write_bytes(b"archive")
+            (stage / "app-v1.0.0-x.tar.gz.sha256").write_text("ignored\n")
+            calls = []
+
+            def runner(command, **kwargs):
+                calls.append((command, kwargs["env"]["VERSION"], kwargs["env"]["TAG"]))
+                return subprocess.CompletedProcess(command, 0, stdout="## 1.0.0\n\nNotes.\n")
+
+            shape = release.github_release(
+                "app", stage, Path(d) / "notes.md", runner=runner,
+                read=self.config('    notes: ./notes.sh "$VERSION"\n    checksums: SHA256SUMS\n    attest: true\n'))
+            self.assertEqual(shape, {"notes": True, "attest": True, "checksums": "SHA256SUMS", "homebrew": {},
+                                     "chocolatey": {}})
+            self.assertEqual(calls, [('./notes.sh "$VERSION"', "1.0.0", "v1.0.0")])
+            self.assertEqual((Path(d) / "notes.md").read_text(), "## 1.0.0\n\nNotes.\n")
+            import hashlib
+            self.assertEqual((stage / "SHA256SUMS").read_text(),
+                             f"{hashlib.sha256(b'archive').hexdigest()}  app-v1.0.0-x.tar.gz\n",
+                             "every file but the .sha256 ones")
+
+    def test_without_options_github_generates_the_notes(self):
+        with tempfile.TemporaryDirectory() as d:
+            shape = release.github_release("app", d, Path(d) / "notes.md", read=self.config(""))
+            self.assertEqual(shape, {"notes": False, "attest": False, "checksums": "", "homebrew": {}, "chocolatey": {}})
+            self.assertEqual(list(Path(d).iterdir()), [])
+
+    def test_empty_notes_are_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(RuntimeError):
+                release.github_release("app", d, Path(d) / "n.md", read=self.config("    notes: 'true'\n"),
+                                       runner=lambda c, **k: subprocess.CompletedProcess(c, 0, stdout="\n"))
+
+
+class Channels(unittest.TestCase):
+    """Homebrew and Chocolatey, made from a github package's release."""
+
+    CONFIG = ('packages:\n  - name: tool\n    registry: github\n    manifest: Cargo.toml\n'
+              '    version: "1.2.0"\n    tag: "v{version}"\n'
+              '    artifacts: [{kind: rust-binary, bin: tool}]\n'
+              '    homebrew: {tap: org/homebrew-tap, formula: packaging/tool.rb.tmpl}\n'
+              '    chocolatey: {package: packaging/choco, test: tool --version}\n')
+    SUMS = "\n".join(f"{c * 64}  tool-v1.2.0-{t}" for c, t in [
+        ("a", "aarch64-apple-darwin.tar.gz"), ("b", "x86_64-unknown-linux-musl.tar.gz"),
+        ("c", "x86_64-pc-windows-msvc.zip")]) + "\n" + "d" * 64 + "  SHA256SUMS\n"
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.cwd = os.getcwd()
+        os.chdir(self.dir.name)
+        files = {
+            "Cargo.toml": '[package]\nname = "tool"\nversion = "1.2.0"\n',
+            "release-kit.yml": self.CONFIG,
+            "packaging/tool.rb.tmpl": 'class Tool < Formula\n  version "${version}"\n'
+                                      '  url "${url_aarch64_apple_darwin}"\n  sha256 "${sha256_aarch64_apple_darwin}"\n'
+                                      '  def install\n    bin.install "tool"  # #{prefix} stays\n  end\nend\n',
+            "packaging/choco/tool.nuspec.tmpl": "<version>${version}</version>\n",
+            "packaging/choco/tools/chocolateyinstall.ps1.tmpl":
+                "$d = ${env:TEMP}\nurl64bit = '${url_x86_64_pc_windows_msvc}'\nchecksum64 = '${sha256_x86_64_pc_windows_msvc}'\n",
+            "packaging/choco/tools/LICENSE.txt": "MIT\n",
+        }
+        for name, text in files.items():
+            Path(name).parent.mkdir(parents=True, exist_ok=True)
+            Path(name).write_text(text)
+        sh(".", "git", "init", "-q")
+
+    def tearDown(self):
+        os.chdir(self.cwd)
+        self.dir.cleanup()
+
+    def test_channels_are_checked(self):
+        read = files_on_disk = release.files_on_disk(Path.cwd())
+        self.assertEqual(release.check(read), [])
+        for bad, message in [("{tap: org/homebrew-tap}", "homebrew needs formula"),
+                             ("{tap: nope, formula: f}", "tap is owner/repository"),
+                             ("{tap: org/t, formula: f, url: x}", "does not take url")]:
+            Path("release-kit.yml").write_text(self.CONFIG.replace(
+                "{tap: org/homebrew-tap, formula: packaging/tool.rb.tmpl}", bad))
+            self.assertIn(message, "\n".join(release.check(files_on_disk)), bad)
+
+    def test_the_formula_is_rendered_from_the_release(self):
+        [formula] = release.render_channel("tool", "homebrew", self.SUMS, "out", repo="org/tool")
+        self.assertEqual(formula.name, "tool.rb")
+        text = formula.read_text()
+        self.assertIn('version "1.2.0"', text)
+        self.assertIn('url "https://github.com/org/tool/releases/download/v1.2.0/'
+                      'tool-v1.2.0-aarch64-apple-darwin.tar.gz"', text)
+        self.assertIn(f'sha256 "{"a" * 64}"', text)
+        self.assertIn("#{prefix} stays", text)
+
+    def test_the_chocolatey_package_is_rendered_and_copied(self):
+        written = release.render_channel("tool", "chocolatey", self.SUMS, "out", repo="org/tool")
+        self.assertEqual(sorted(str(p.relative_to("out")) for p in written),
+                         ["tool.nuspec", "tools/LICENSE.txt", "tools/chocolateyinstall.ps1"])
+        script = Path("out/tools/chocolateyinstall.ps1").read_text()
+        self.assertIn("${env:TEMP}", script, "PowerShell's own ${env:...} is left alone")
+        self.assertIn(f"checksum64 = '{'c' * 64}'", script)
+
+    def test_a_placeholder_without_a_value_is_an_error(self):
+        Path("packaging/tool.rb.tmpl").write_text('sha256 "${sha256_riscv64gc_unknown_linux_gnu}"\n')
+        with self.assertRaisesRegex(ValueError, "no value for .*riscv64gc"):
+            release.render_channel("tool", "homebrew", self.SUMS, "out", repo="org/tool")
+
+    def test_the_gate_says_which_channels_are_due(self):
+        read = release.files_on_disk(Path.cwd())
+        outputs = release.gate_outputs("abc", release.load(read), release.load(read).packages, False,
+                                       output=os.devnull)
+        self.assertEqual((outputs["homebrew"], outputs["chocolatey"]), ("true", "true"))
+
+    def test_the_tap_gets_a_branch_and_a_pull_request(self):
+        sh(".", "git", "init", "-q", "--bare", "-b", "main", "tap.git")
+        sh(".", "git", "clone", "-q", "tap.git", "tap")
+        sh("tap", "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init")
+        sh("tap", "git", "push", "-q", "origin", "HEAD:main")
+        [formula] = release.render_channel("tool", "homebrew", self.SUMS, "out", repo="org/tool")
+        prs = []
+        url = release.update_tap("tap", formula, "org/homebrew-tap", "1.2.0", "https://example.invalid/r",
+                                 open_pr=lambda *args: prs.append(args) or "https://example.invalid/pr/1")
+        self.assertEqual(url, "https://example.invalid/pr/1")
+        self.assertEqual(prs[0][:4], ("org/homebrew-tap", "tool-1.2.0", "main", "tool 1.2.0"))
+        self.assertIn("class Tool", sh(".", "git", "--git-dir=tap.git", "show", "tool-1.2.0:Formula/tool.rb"))
+        # Once the tap has it, nothing is pushed again.
+        sh("tap", "git", "checkout", "-q", "main")
+        sh("tap", "git", "merge", "-q", "--ff-only", "tool-1.2.0")
+        self.assertIsNone(release.update_tap("tap", formula, "org/homebrew-tap", "1.2.0", "u",
+                                             open_pr=lambda *a: self.fail("no pull request")))
 
 
 class Timeout(unittest.TestCase):

@@ -20,10 +20,17 @@ A `github` package's `name` is free: `check` does not compare it with the
 manifest. Its version still comes from the manifest. It needs at least one
 artifact (`rust-binary`, `python`, `maturin`, `vsix` or `command`).
 
+`notes`, `checksums` and `attest` shape the release: notes from a command
+(for example a CHANGELOG section), one `SHA256SUMS`-style file over every
+asset, and build provenance attestations. See
+[GitHub release options](../configuration.md#github-release-options).
+
 ## Credentials and setup
 
 None. The `publish-github` job uses the job's `github.token` with
-`contents: write`. It has no environment.
+`contents: write`. It has no environment. A package with `attest: true` also
+needs `id-token: write` and `attestations: write` on the job (the template
+grants them; add them to a `release.yml` installed before).
 
 ## Publish
 
@@ -32,12 +39,16 @@ The `publish-github` action, for each selected `github` package in order:
 1. runs `preflight`;
 2. takes the package's files from `dist/release--<slug>--*/` (every build
    job's output, including the `.sha256` files), and fails if there are none;
-3. creates the release on the tag, if it does not exist:
-   `gh release create <tag> --verify-tag --title "<name> <version>" --generate-notes`,
-   with `--prerelease` when the version contains `-`;
-4. uploads the files with `gh release upload --clobber`;
-5. downloads every asset the release now serves into a new directory and
-   checks each `.sha256` against its file with `sha256sum -c`.
+3. writes its `checksums` file beside them and runs its `notes` command, if
+   it has them (`release.py github-release`);
+4. with `attest: true`, attests every file but the `.sha256` ones;
+5. creates the release on the tag, if it does not exist:
+   `gh release create <tag> --verify-tag --title "<name> <version>"` with
+   `--notes-file` (from `notes`) or `--generate-notes`, and `--prerelease`
+   when the version contains `-`;
+6. uploads the files with `gh release upload --clobber`;
+7. downloads every asset the release now serves into a new directory and
+   checks each `.sha256`, and the `checksums` file, against the files.
 
 Then it runs `verify --registry github --timeout 120`.
 
@@ -59,5 +70,5 @@ and has at least one asset. `verify` reads the GitHub API with `GH_TOKEN` or
 
 ## Consume
 
-Nothing beyond step 5: the action has already downloaded every file as a
+Nothing beyond step 7: the action has already downloaded every file as a
 stranger would and checked its checksum.
