@@ -162,6 +162,7 @@ the runner it needs.
 | `maturin` | a wheel per target with maturin, plus an sdist | `pypi`, `github` | | `targets`, `sdist`, `test`, `prepare` |
 | `vsix` | `<name>-<version>.vsix`, with `vsce package` | `vscode`, `github` | | `dir`, `test`, `prepare` |
 | `command` | whatever `run` makes, collected by the `outputs` glob | `github`, `pypi`, `vscode` | `run`, `outputs` | `os`, `test`, `prepare` |
+| `ci-artifact` | nothing: promotes the files of one CI artifact, unchanged | `github`, `pypi`, `vscode` | `artifact`, `sha256`, `files` | `test` |
 
 Any other field is refused (`rust-binary does not take dir`).
 
@@ -243,6 +244,36 @@ Then every file matching `outputs` (a glob from the repository root) is copied
 into `OUT`, unless it is already there. Files `run` writes straight into
 `$OUT` are collected too. The build action installs nothing extra for this
 kind: use what the runner has, or install it in `run`.
+
+### `ci-artifact`
+
+```yaml
+      - kind: ci-artifact
+        artifact: 13290975305     # the GitHub Actions artifact's id
+        sha256: 401bc5a6f09a149774a57d33f427aebdfbaee86bc939945b8368b19a8306fabb
+        files: "dist/*.whl"       # the archive members to publish
+```
+
+Publishes the exact files a CI run in this repository already built and
+tested, instead of building them again: for a project whose release must ship
+the reviewed bytes (a wheel with staged components, a VSIX that passed an
+acceptance gate). The job downloads the artifact's archive and refuses, before
+anything is published, unless:
+
+- the archive's SHA-256 is `sha256`, and GitHub records the same digest;
+- the artifact has not expired;
+- the commit that built it has the **same files (git tree)** as the tagged
+  commit. This is rule 4: a CI run on a release-candidate branch qualifies once
+  that branch is merged to `main` unchanged; a run on any other files does not;
+- every member matching `files` (a glob over the archive's paths) carries the
+  package's version in its name (PEP 440 form for PyPI), and at least one does.
+
+The matching members are copied into `dist` under their own names, and the
+artifact's `test` (if any) runs on them as for any other kind. Only this kind's
+build step is given a token, with `actions: read`; the build workflow and the
+template's `build` job grant that permission. An artifact lives for its
+repository's retention period (90 days by default), so pin it close to the
+release.
 
 ### Targets and runners
 

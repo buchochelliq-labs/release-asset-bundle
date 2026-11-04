@@ -195,6 +195,105 @@ class Artifacts(unittest.TestCase):
             self.assertEqual(zipfile.ZipFile(zipped).namelist(), ["onto-win/onto"])
 
 
+class CiArtifact(unittest.TestCase):
+    """kind: ci-artifact promotes the exact files a CI run built; GitHub is faked."""
+    WHEEL = "dist/pkg-1.0-py3-none-any.whl"
+
+    def archive(self, members):
+        import io
+        import zipfile
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            for name, data in members.items():
+                archive.writestr(name, data)
+        return stream.getvalue()
+
+    def config(self, artifact):
+        files = {"py/pyproject.toml": '[project]\nname = "pkg"\nversion = "1.0"\n',
+                 "release-kit.yml": 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n'
+                                    f'    version: "1.0"\n    artifacts: [{artifact}]\n'}
+        return reader(files)
+
+    def job(self, data, **extra):
+        import hashlib
+        return {"id": "pkg-ci-artifact-0", "kind": "ci-artifact", "package": "pkg", "slug": "pkg",
+                "version": "1.0", "registry": "pypi", "artifact": 42,
+                "sha256": hashlib.sha256(data).hexdigest(), "files": "dist/*.whl", "test": None, **extra}
+
+    def github(self, data, meta=None, built_tree="T1"):
+        import hashlib
+        meta = {"expired": False, "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
+                "workflow_run": {"head_sha": "c0ffee" * 6 + "abcd"}, **(meta or {})}
+
+        def api(path, accept=None):
+            if path.endswith("/zip"):
+                return 302, {"Location": "https://blob.example/a.zip?sig=x"}, b""
+            if "/git/commits/" in path:
+                return 200, {}, json.dumps({"tree": {"sha": built_tree}}).encode()
+            return 200, {}, json.dumps(meta).encode()
+        return api
+
+    def promote(self, data, job=None, **github):
+        from unittest import mock
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(release, "github_api", self.github(data, **github)), \
+                mock.patch.object(release, "download", lambda url: data), \
+                mock.patch.object(release, "repository", lambda: "owner/repo"), \
+                mock.patch.object(release, "git", lambda *args, **kwargs: "T1"):
+            made = release.build(job or self.job(data), Path(d) / "dist")
+            return [(p.name, p.read_bytes()) for p in made]
+
+    def test_ci_artifacts_are_checked(self):
+        cases = {
+            "{kind: ci-artifact}": "ci-artifact needs artifact, files, sha256",
+            '{kind: ci-artifact, artifact: "42", sha256: ' + "a" * 64 + ', files: "dist/*"}': "numeric id",
+            "{kind: ci-artifact, artifact: 42, sha256: ABC, files: 'dist/*'}": "64 lowercase hex",
+            "{kind: ci-artifact, artifact: 42, sha256: " + "a" * 64 + ", files: ''}": "files is a glob",
+            "{kind: ci-artifact, artifact: 42, sha256: " + "a" * 64 + ", files: 'dist/*', run: x}":
+                "does not take run",
+        }
+        for artifact, message in cases.items():
+            self.assertIn(message, "\n".join(release.check(self.config(artifact))), artifact)
+        self.assertEqual(release.check(self.config("{kind: ci-artifact, artifact: 42, sha256: " + "a" * 64
+                                                   + ", files: 'dist/*.whl'}")), [])
+
+    def test_the_plan_carries_the_pin(self):
+        read = self.config("{kind: ci-artifact, artifact: 42, sha256: " + "a" * 64 + ", files: 'dist/*.whl', "
+                           "test: 'pip install $FILES'}")
+        [job] = release.plan(json.dumps([{"name": "pkg", "registry": "pypi"}]), read=read)
+        self.assertEqual((job["kind"], job["artifact"], job["sha256"], job["files"], job["test"]),
+                         ("ci-artifact", 42, "a" * 64, "dist/*.whl", "pip install $FILES"))
+
+    def test_the_reviewed_bytes_are_promoted_unchanged(self):
+        data = self.archive({self.WHEEL: b"reviewed wheel", "evidence/log.txt": b"not published"})
+        self.assertEqual(self.promote(data), [("pkg-1.0-py3-none-any.whl", b"reviewed wheel")])
+
+    def test_promotion_fails_closed(self):
+        data = self.archive({self.WHEEL: b"reviewed wheel"})
+        cases = [
+            ("the archive's SHA-256", dict(job=self.job(data, sha256="0" * 64), meta={"digest": None})),
+            ("GitHub records", dict(meta={"digest": "sha256:" + "1" * 64})),
+            ("has expired", dict(meta={"expired": True})),
+            ("a release is one commit", dict(built_tree="T2")),
+            ("no member matches", dict(job=self.job(data, files="dist/*.tar.gz"))),
+        ]
+        for message, kwargs in cases:
+            with self.assertRaisesRegex(RuntimeError, message):
+                self.promote(data, **kwargs)
+        stale = self.archive({"dist/pkg-0.9-py3-none-any.whl": b"old"})
+        with self.assertRaisesRegex(RuntimeError, "is not version 1.0"):
+            self.promote(stale)
+        unsafe = self.archive({"dist/../pkg-1.0-py3-none-any.whl": b"x"})
+        with self.assertRaisesRegex(RuntimeError, "unsafe path"):
+            self.promote(unsafe, job=self.job(unsafe, files="dist/*"))
+
+    def test_the_artifact_test_runs_on_the_promoted_files(self):
+        data = self.archive({self.WHEEL: b"reviewed wheel"})
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.promote(data, job=self.job(data, test="test -z \"$FILES\""))
+        self.promote(data, job=self.job(data, test='for f in $FILES; do test -s "$f"; done'))
+
+
 class Repo(unittest.TestCase):
     """A bare remote, a working clone and helpers, with the cwd in the clone."""
 

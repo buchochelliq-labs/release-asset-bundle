@@ -77,6 +77,9 @@ jobs:
   build:
     needs: [gate, ci]
     if: needs.gate.outputs.verify-only != 'true'
+    permissions:
+      contents: read
+      actions: read   # a ci-artifact reads this repository's CI artifacts
     uses: ./.github/workflows/release-kit-build.yml
     with:
       sha: ${{ needs.gate.outputs.sha }}

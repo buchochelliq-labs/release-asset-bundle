@@ -38,6 +38,14 @@ want, run `install`, and open a PR.
 
 ### Unreleased
 
+**Promote reviewed CI artifacts.** A new artifact kind, `ci-artifact`,
+publishes the files of a pinned GitHub Actions artifact unchanged instead of
+building them again: for releases that must ship exactly the bytes CI built
+and tested. The archive's SHA-256 is pinned, an expired artifact is refused,
+and the commit that built it must have the tagged commit's files (rule 4). The
+build workflow and the template's `build` job gain `actions: read`; add it to
+the `build` job of an installed `release.yml` to use this kind.
+
 **GitHub releases are drafts until complete.** `publish-github` creates the
 release as a draft, uploads and checks every file, then publishes it. A
 draft does not count as published, so a run that stopped halfway is
