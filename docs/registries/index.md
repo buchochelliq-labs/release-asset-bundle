@@ -19,6 +19,9 @@ set on that package rather than as a `registry`:
 | `homebrew` | [a Homebrew tap](homebrew.md) | a formula, as a pull request on the tap | a token for the tap | `homebrew` |
 | `chocolatey` | [Chocolatey](chocolatey.md) | a package that installs the release's archive | an API key | `chocolatey` |
 
+Unlike a registry's version, these two can be published again until they are
+done: see [the retry policy](../recovery.md#what-each-channel-allows-again-the-retry-policy).
+
 Every publish action follows the same steps:
 
 1. **preflight**: refuse any selected version already on the registry

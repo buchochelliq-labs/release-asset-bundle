@@ -120,11 +120,15 @@ jobs:
   # From the GitHub release, once it is out: a github package's `homebrew`
   # formula, attached to the release and proposed to the tap with the
   # environment's HOMEBREW_TAP_TOKEN (without it, only a notice).
+  # It also runs alone, when the gate selected a published release only to
+  # finish its formula (publish-github is then skipped: nothing to upload).
   publish-homebrew:
-    needs: [gate, publish-github]
+    needs: [gate, ci, build, publish-github]
     if: >-
-      !cancelled() && needs.gate.outputs.homebrew == 'true' && needs.publish-github.result == 'success'
-      && needs.gate.outputs.verify-only != 'true'
+      !cancelled() && needs.gate.outputs.homebrew == 'true' && needs.gate.outputs.verify-only != 'true'
+      && (needs.publish-github.result == 'success'
+          || (needs.publish-github.result == 'skipped' && needs.gate.outputs.github != 'true'
+              && needs.ci.result == 'success' && needs.build.result == 'success'))
     runs-on: ubuntu-latest
     environment: homebrew
     permissions:
@@ -147,11 +151,14 @@ jobs:
 
   # A github package's `chocolatey` package, installed from the release on
   # Windows and pushed with the environment's CHOCOLATEY_API_KEY.
+  # Like publish-homebrew, it also runs alone to finish a published release.
   publish-chocolatey:
-    needs: [gate, publish-github]
+    needs: [gate, ci, build, publish-github]
     if: >-
-      !cancelled() && needs.gate.outputs.chocolatey == 'true' && needs.publish-github.result == 'success'
-      && needs.gate.outputs.verify-only != 'true'
+      !cancelled() && needs.gate.outputs.chocolatey == 'true' && needs.gate.outputs.verify-only != 'true'
+      && (needs.publish-github.result == 'success'
+          || (needs.publish-github.result == 'skipped' && needs.gate.outputs.github != 'true'
+              && needs.ci.result == 'success' && needs.build.result == 'success'))
     runs-on: windows-latest
     environment: chocolatey
     steps:

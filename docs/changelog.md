@@ -54,7 +54,9 @@ commit, the run, each job's result, and every package's outcome
 registry URL and the SHA-256 of the files built for it, with an overall
 `result` (`complete`, `partial`, `nothing-published`). A `vscode` package
 with `open-vsx: true` counts as published only on both registries, and also
-gets `open_vsx_url`. A coordinator
+gets `open_vsx_url`. A `github` package's due Homebrew and Chocolatey jobs
+count toward `result`; one selected only to finish them is
+`already-published` with those jobs' results in `channels`. A coordinator
 releasing a project across repositories downloads it with `gh run download
 <run> -n release-record`. A new last job in the template, `record`, writes it
 with the new `release.py record` command, even when publishing fails, with no
@@ -64,6 +66,26 @@ Schema is published as
 repositories must add the `record` job to their `release.yml`**: `install`
 does not change an existing one. Copy it from `templates/release.yml`. See
 [The release record](release-record.md).
+
+**Retry policy per channel; `tag` finishes Homebrew and Chocolatey.** Each
+channel has a retry policy defined by release-kit: `once` for crates.io, PyPI,
+npm and the VS Code Marketplace, `finish` for GitHub Releases, `idempotent`
+for a Homebrew tap and `until-accepted` for Chocolatey. The derived channels
+now have a state, read live: Homebrew is done when the tap's default branch
+has the formula at the version or a pull request from `<name>-<version>` is
+open; Chocolatey when the community API lists the version or it is in
+moderation. When a `github` package is published but one of its channels is
+not done, `tag` goes back to its commit (`finish <tag>`) and pushes the
+release tag again, and the gate selects the package for that channel only:
+each selection entry gains `channels`, the gate's `github` flag is false for
+it, and `homebrew`/`chocolatey` are true only when that channel is due. `tag`
+also waits briefly for a release's channels and names any not done.
+`status` prints each channel's policy and state. **Update an installed
+`release.yml`:** give `publish-homebrew` and `publish-chocolatey` `needs:
+[gate, ci, build, publish-github]` and let them run when `publish-github` was
+skipped because nothing was due on GitHub (copy the two `if:` conditions from
+`templates/release.yml`); without that, a run that only finishes a channel
+publishes nothing. See [the retry policy](recovery.md#what-each-channel-allows-again-the-retry-policy).
 
 **Promote reviewed CI artifacts.** A new artifact kind, `ci-artifact`,
 publishes the files of a pinned GitHub Actions artifact unchanged instead of

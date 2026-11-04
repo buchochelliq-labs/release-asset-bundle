@@ -16,6 +16,10 @@ release_cohort.py; the rules are the same:
   - A failed release is finished by running `tag` again: a run that provably
     published nothing has its tags moved or pushed again; a run that published
     part of the release is pushed again and publishes only what is still due.
+    Each channel has a retry policy (RETRY): a registry's version is published
+    once; a Homebrew formula or Chocolatey package made from a published GitHub
+    release is published again until it is done, read live from the tap or
+    the community repository.
 
 Commands (person):
     check       release-kit.yml matches every manifest, names no package twice,
@@ -79,6 +83,7 @@ if sys.version_info < (3, 11):
     sys.exit(f"release.py needs Python 3.11 or newer (for tomllib); this is {sys.version.split()[0]}")
 
 import argparse
+import base64
 from dataclasses import dataclass, field
 import fnmatch
 import hashlib
@@ -622,7 +627,8 @@ def plan(selection, read=None, output=None):
     """The build matrix for the selected packages: one job per artifact, or per
     artifact and target. Writes `jobs` (JSON) and `count` to GITHUB_OUTPUT."""
     release = load(read or files_on_disk())
-    wanted = {(s["registry"], s["name"]) for s in json.loads(selection)}
+    # A package selected only to finish the channels made from it builds nothing.
+    wanted = {(s["registry"], s["name"]) for s in json.loads(selection) if due_on(s, s["registry"])}
     jobs = []
     for package in release.packages:
         if (package.registry, package.name) not in wanted:
@@ -811,8 +817,7 @@ def render_channel(name, channel, sums_text, out, read=None, repo=None):
     out.mkdir(parents=True, exist_ok=True)
     if channel == "homebrew":
         template = Path(settings["formula"])
-        formula = settings.get("name") or template.name.removesuffix(".tmpl").removesuffix(".rb")
-        target = out / f"{formula}.rb"
+        target = out / f"{formula_name(settings)}.rb"
         target.write_text(render_template(template.read_text(encoding="utf-8"), values, str(template)),
                           encoding="utf-8")
         return [target]
@@ -874,6 +879,130 @@ def update_tap(tap, formula, repo, version, release_url, open_pr=open_tap_pr):
                   "(release-kit).")
     print(f"tap pull request for {name} {version}: {url}", flush=True)
     return url
+
+
+# ---------------------------------------------------------------------------
+# Retry policy: which publications can be run again
+#
+# Defined by release-kit, not configured: it is what each channel allows.
+#   once            a version is permanent: never uploaded again (rule 1).
+#   finish          an unfinished one (a draft GitHub release) is completed;
+#                   a published one is never touched again.
+#   idempotent      publishing again is harmless: done again until done.
+#   until-accepted  can be pushed again until the channel has accepted it
+#                   (accepted includes "in moderation": pushing then is refused).
+# The registries say themselves whether a version is published (`published_on`);
+# the channels made from a GitHub release have their own state, read live
+# (`channel_state`), so `tag` and the gate can select a published package
+# again for the channels it still lacks.
+RETRY = {"github": "finish", "crates.io": "once", "pypi": "once", "npm": "once", "vscode": "once",
+         "homebrew": "idempotent", "chocolatey": "until-accepted"}
+# Channel states that count as done. Homebrew: `merged` (the tap's default
+# branch has the version), `proposed` (an open pull request from the
+# release's branch: merging it is the tap's maintainers' step), `prerelease`
+# (prereleases are left out of the tap). Chocolatey: `listed` (approved), and
+# `submitted` (in its checks or moderation, which can take days). Anything
+# else (`due`, a `rejected` Chocolatey version) is due.
+DONE = {"merged", "proposed", "prerelease", "listed", "submitted"}
+
+
+def channels_of(package):
+    """Every channel `package` publishes to: its registry, then the channels
+    made from its GitHub release, in CHANNEL_KEYS order."""
+    options = dict(package.github)
+    return [package.registry] + [c for c in CHANNEL_KEYS if package.registry == "github" and options.get(c)]
+
+
+def formula_name(settings):
+    """A `homebrew` setting's formula name: `name`, else the template's file
+    name without .tmpl and .rb."""
+    return settings.get("name") or PurePosixPath(settings["formula"]).name.removesuffix(".tmpl").removesuffix(".rb")
+
+
+def github_headers():
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    return {"Accept": "application/vnd.github+json", **({"Authorization": f"Bearer {token}"} if token else {})}
+
+
+def homebrew_state(package, settings, fetch=http_status):
+    """`merged`, `proposed`, `prerelease` or `due`: whether the tap's default
+    branch has Formula/<name>.rb at this version, else whether a pull request
+    from the release's branch `<name>-<version>` is open on the tap."""
+    if "-" in package.version:
+        return "prerelease"
+    tap, name = settings["tap"], formula_name(settings)
+    status, body = fetch(f"https://api.github.com/repos/{tap}/contents/Formula/{quote(name)}.rb",
+                         headers=github_headers())
+    if status == 200:
+        content = base64.b64decode(json.loads(body).get("content") or "").decode("utf-8", "replace")
+        if version_in(content, package.version):
+            return "merged"
+    head = f"{tap.split('/')[0]}:{name}-{package.version}"
+    status, body = fetch(f"https://api.github.com/repos/{tap}/pulls?state=open&head={quote(head)}",
+                         headers=github_headers())
+    return "proposed" if status == 200 and json.loads(body) else "due"
+
+
+def chocolatey_id(directory, commit=None):
+    """The `<id>` in a chocolatey package directory's one .nuspec (or
+    .nuspec.tmpl), at `commit` or else in the working tree."""
+    directory = directory.rstrip("/")
+    if commit:
+        names = git("ls-tree", "-r", "--name-only", commit, "--", f"{directory}/").splitlines()
+        texts = {n: git("show", f"{commit}:{n}") for n in names if n.endswith((".nuspec", ".nuspec.tmpl"))}
+    else:
+        texts = {str(p): p.read_text(encoding="utf-8") for p in (root() / directory).rglob("*")
+                 if p.is_file() and p.name.endswith((".nuspec", ".nuspec.tmpl"))}
+    ids = [m[1].strip() for m in (re.search(r"<id>([^<]+)</id>", t) for t in texts.values()) if m]
+    if len(ids) != 1 or "${" in ids[0]:
+        raise ValueError(f"chocolatey package {directory} needs exactly one .nuspec with a literal <id>")
+    return ids[0]
+
+
+def chocolatey_state(package, settings, fetch=http_status, commit=None):
+    """`listed`, `submitted`, `rejected` or `due`, from the community
+    repository's API: the version's PackageStatus (Approved or Exempted is
+    listed; Submitted, in checks or moderation, is submitted), or due when it
+    has never been pushed."""
+    ident = chocolatey_id(settings["package"], commit)
+    status, body = fetch(f"https://community.chocolatey.org/api/v2/Packages(Id='{quote(ident)}',"
+                         f"Version='{quote(package.version)}')")
+    if status != 200:
+        return "due"
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else body
+    found = re.search(r"<d:PackageStatus>([^<]*)</d:PackageStatus>", text)
+    state = found[1].strip().lower() if found else ""
+    if state == "rejected":
+        return "rejected"
+    if state in ("approved", "exempted"):
+        return "listed"
+    if not state:
+        approved = re.search(r"<d:IsApproved[^>]*>([^<]*)</d:IsApproved>", text)
+        return "listed" if approved is None or approved[1].strip() == "true" else "submitted"
+    return "submitted"
+
+
+def channel_state(package, channel, commit=None, fetch=http_status):
+    """The live state of a channel made from `package`'s GitHub release."""
+    settings = dict(dict(package.github).get(channel) or {})
+    if channel == "homebrew":
+        return homebrew_state(package, settings, fetch)
+    if channel == "chocolatey":
+        return chocolatey_state(package, settings, fetch, commit)
+    raise ValueError(f"{channel} is not a channel made from a release")
+
+
+def pending_channels(package, state_of):
+    """{channel: state} of the channels made from a published `package` that
+    are not done and may be run again (`idempotent` or `until-accepted`).
+    `state_of(package, channel)` reads a channel's state."""
+    pending = {}
+    for channel in channels_of(package)[1:]:
+        if RETRY[channel] in ("idempotent", "until-accepted"):
+            state = state_of(package, channel)
+            if state not in DONE:
+                pending[channel] = state
+    return pending
 
 
 def bash_command(command):
@@ -1210,9 +1339,13 @@ def trailers(tag_name):
 # The gate (CI)
 
 
-def gate(tag_name, remote="origin", status=published_on, output=None, verify_only=False):
+def gate(tag_name, remote="origin", status=published_on, output=None, verify_only=False,
+         channel_status=channel_state):
     """Everything a release run must hold before building, from the checked-out
-    tag. Returns the outputs written to GITHUB_OUTPUT."""
+    tag. Returns the outputs written to GITHUB_OUTPUT. A published package
+    whose release's derived channels (Homebrew, Chocolatey) are not done is
+    selected for those channels only: `channel_status(package, channel,
+    commit)` reads their state."""
     ref = f"refs/tags/{tag_name}"
     if git("cat-file", "-t", ref) != "tag":
         raise RuntimeError(f"{tag_name} must be an annotated tag (release.py tag makes them)")
@@ -1242,13 +1375,23 @@ def gate(tag_name, remote="origin", status=published_on, output=None, verify_onl
         return verify_selection(tag_name, release, sha, existing, status, output)
     if split := split_from(release, existing, sha, lambda package, tagged: True):
         raise RuntimeError(split_error(sha, split))
-    due = []
+    due, channels = [], {}
     for package in release.packages:
-        if status(package):
-            print(f"{package}: already published; not selected", flush=True)
-        else:
+        if not status(package):
             print(f"{package}: not yet published; selected", flush=True)
             due.append(package)
+            channels[package] = channels_of(package)
+            continue
+        pending = {}
+        if existing.get(package.tag) == sha:
+            pending = pending_channels(package, lambda p, c: channel_status(p, c, sha))
+        if pending:
+            print(f"{package}: already published; selected for "
+                  + ", ".join(f"{c} ({state})" for c, state in pending.items()), flush=True)
+            due.append(package)
+            channels[package] = list(pending)
+        else:
+            print(f"{package}: already published; not selected", flush=True)
     if not due:
         raise RuntimeError(f"{tag_name}: every package of release {release.name} is already published")
     untagged = [f"{p.tag} ({'missing' if p.tag not in existing else 'at ' + existing[p.tag][:12]})"
@@ -1258,27 +1401,33 @@ def gate(tag_name, remote="origin", status=published_on, output=None, verify_onl
                            "release.py tag pushes them.")
     if plain := lightweight(remote, [p.tag for p in due]):
         raise RuntimeError(f"record tags must be annotated: {', '.join(sorted(plain))}")
-    outputs = gate_outputs(sha, release, due, False, output)
+    outputs = gate_outputs(sha, release, due, False, output, channels)
     print(f"{tag_name} -> {sha} (release {release.name}): publishing "
-          + ", ".join(str(p) for p in due), flush=True)
+          + ", ".join(f"{p}: {', '.join(channels[p])}" if channels[p] != channels_of(p) else str(p)
+                      for p in due), flush=True)
     return outputs
 
 
-def gate_outputs(sha, release, chosen, verify_only, output=None):
+def gate_outputs(sha, release, chosen, verify_only, output=None, channels=None):
+    """The gate's outputs. `channels` maps each chosen package to the channels
+    due for it (default: all of them); the selection carries them, and each
+    registry's or channel's flag is true when a chosen package has it due."""
+    channels = channels or {p: channels_of(p) for p in chosen}
     outputs = {
         "sha": sha,
         "release": release.name,
         "selection": json.dumps([{"name": p.name, "registry": p.registry, "version": p.version,
                                   "manifest": p.manifest, "tag": p.tag, "slug": p.slug,
+                                  "channels": channels[p],
                                   **({"open-vsx": True} if p.open_vsx is True else {})} for p in chosen]),
         "verify-only": str(verify_only).lower(),
     }
     for registry in REGISTRIES:
-        outputs[registry.replace(".", "-")] = str(any(p.registry == registry for p in chosen)).lower()
-    # Channels made from a GitHub release: whether a selected github package has one.
+        outputs[registry.replace(".", "-")] = str(any(p.registry == registry and registry in channels[p]
+                                                      for p in chosen)).lower()
+    # Channels made from a GitHub release: whether a chosen package has one due.
     for channel in CHANNEL_KEYS:
-        outputs[channel] = str(any(p.registry == "github" and dict(p.github).get(channel)
-                                   for p in chosen)).lower()
+        outputs[channel] = str(any(channel in channels[p] for p in chosen)).lower()
     target = output or os.environ.get("GITHUB_OUTPUT")
     if target:
         with open(target, "a", encoding="utf-8") as handle:
@@ -1304,10 +1453,18 @@ def verify_selection(tag_name, release, sha, existing, status, output):
 
 def selected(registry, selection):
     """The packages of `registry` in a gate's selection (JSON), in order. The
-    selection carries each package's rendered tag, which serves as its format."""
+    selection carries each package's rendered tag, which serves as its format.
+    A package selected only for the channels made from its release (its own
+    upload is done) is left out."""
     return [Package(s["name"], s["registry"], s["manifest"], s["version"], s.get("tag", "{name}-v{version}"),
                     open_vsx=s.get("open-vsx", False))
-            for s in json.loads(selection) if s["registry"] == registry]
+            for s in json.loads(selection) if s["registry"] == registry and due_on(s, registry)]
+
+
+def due_on(entry, channel):
+    """Whether a selection entry has `channel` due: one of its `channels`, or,
+    in a selection from before channels were selected, any channel."""
+    return channel in entry.get("channels", [channel])
 
 
 def crate_exists(name):
@@ -1572,8 +1729,8 @@ RECORD_SCHEMA = {
             },
         },
         "result": {"enum": list(RESULTS),
-                   "description": "complete: every selected package is on its registry and its publish "
-                                  "job succeeded; partial: this run published some of them; "
+                   "description": "complete: every selected package is on its registry, its publish "
+                                  "job and the jobs of the channels due for it succeeded; partial: this run published some of them; "
                                   "nothing-published: this run published none; unknown: a registry did "
                                   "not answer"},
         "jobs": {"type": "object", "description": "the result of each job the record job needs",
@@ -1593,7 +1750,8 @@ RECORD_SCHEMA = {
                     "selected": {"type": "boolean", "description": "whether the gate selected it"},
                     "outcome": {"enum": list(OUTCOMES)},
                     "job": {"enum": [*JOB_RESULTS, None],
-                            "description": "its publish job's result; null when not selected"},
+                            "description": "its publish job's result; null when not selected, or "
+                                           "selected only to finish its channels"},
                     "url": {"type": ["string", "null"],
                             "description": "where its registry serves this version; null when it does not"},
                     "files": {
@@ -1614,7 +1772,7 @@ RECORD_SCHEMA = {
                                                     "serves this version; null when it does not"},
                     "channels": {"type": "object",
                                  "description": "a selected github package's homebrew and chocolatey "
-                                                "jobs: their results",
+                                                "jobs, those due for it in this run: their results",
                                  "additionalProperties": {"enum": list(JOB_RESULTS)}},
                 },
             },
@@ -1718,11 +1876,14 @@ def record(tag_name, sha, selection, verify_only, needs, dist="dist", read=None,
     from one that published part of the release. `needs` is that job's
     `toJSON(needs)`; `selection` and `sha` the gate's outputs (empty when
     the gate failed). A selected package whose publish job did not succeed
-    is looked up on its registry: a job can fail after uploading."""
+    is looked up on its registry: a job can fail after uploading. A package
+    the gate selected only to finish the channels made from its release
+    (its entry's `channels` leave out its registry) was already published:
+    its record is those channel jobs' results."""
     jobs = job_results(needs)
     repo = repo or repository()
     gated = jobs.get("gate") == "success"
-    chosen = {(s["registry"], s["name"]) for s in json.loads(selection or "[]")} if gated else set()
+    chosen = {(s["registry"], s["name"]): s for s in json.loads(selection or "[]")} if gated else {}
     if not sha:
         try:
             sha = git("rev-parse", "--verify", f"refs/tags/{tag_name}^{{commit}}")
@@ -1734,13 +1895,21 @@ def record(tag_name, sha, selection, verify_only, needs, dist="dist", read=None,
         print(f"cannot read {CONFIG} at {sha}: {error}", flush=True)
         release = None
     on_registry = "already-published" if verify_only else "published"
-    packages = []
+    packages, done, published_any = [], [], False
     for package in release.packages if release else ():
         selected = (package.registry, package.name) in chosen
         job, files, channels = None, [], {}
+        if selected:
+            entry = chosen[package.registry, package.name]
+            # Its due channels made from a release (all of them, in a selection from before #20).
+            channels = {channel: jobs.get(CHANNEL_JOBS[channel]) or "skipped"
+                        for channel in entry.get("channels", channels_of(package)) if channel in CHANNEL_JOBS}
         if not selected:
             # A normal run's gate selects every package that is not yet published.
             outcome = "already-published" if gated and not verify_only else "skipped"
+        elif not due_on(entry, package.registry):
+            # Selected only to finish its channels: the gate saw it published.
+            outcome = "already-published"
         else:
             name = PUBLISH_JOBS[package.registry]
             if name not in jobs:
@@ -1758,8 +1927,13 @@ def record(tag_name, sha, selection, verify_only, needs, dist="dist", read=None,
                 outcome = ("unknown" if there is None else on_registry if there
                            else "skipped" if job == "skipped" else "failed")
             files = built_files(dist, package.slug)
-            channels = {channel: jobs.get(name) or "skipped" for channel, name in CHANNEL_JOBS.items()
-                        if package.registry == "github" and dict(package.github).get(channel)}
+        if selected:
+            # Done: its own upload (when due) and, outside a verify-only run
+            # (which runs no channel job), every channel due for it.
+            own = job is None or (outcome == on_registry and job == "success")
+            done.append(own and (verify_only or all(r == "success" for r in channels.values())))
+            published_any |= outcome == "published" or (
+                not verify_only and any(r == "success" for r in channels.values()))
         entry = {"name": package.name, "registry": package.registry, "version": package.version,
                  "tag": package.tag, "selected": selected, "outcome": outcome, "job": job,
                  "url": registry_url(package, repo) if outcome in ("published", "already-published") else None,
@@ -1771,9 +1945,9 @@ def record(tag_name, sha, selection, verify_only, needs, dist="dist", read=None,
             entry["channels"] = channels
         packages.append(entry)
     mine = [p for p in packages if p["selected"]]
-    if mine and all(p["outcome"] == on_registry and p["job"] == "success" for p in mine):
+    if mine and all(done):
         result = "complete"
-    elif any(p["outcome"] == "published" for p in mine):
+    elif published_any:
         result = "partial"
     elif any(p["outcome"] == "unknown" for p in mine):
         result = "unknown"
@@ -1793,6 +1967,8 @@ def record_lines(document):
     lines = [f"release {document['release']} ({document['tag']}): {document['result']}"]
     for package in document["packages"]:
         job = f" (publish job: {package['job']})" if package["job"] else ""
+        if package.get("channels"):
+            job += " (" + ", ".join(f"{c}: {r}" for c, r in package["channels"].items()) + ")"
         lines.append(f"  {package['name']} {package['version']} on {package['registry']}: "
                      f"{package['outcome']}{job}")
     return lines
@@ -1906,10 +2082,12 @@ def releases_tagged(existing, release_tag_pattern):
     return found
 
 
-def resolve(commit, wanted, remote, existing, binds, published):
+def resolve(commit, wanted, remote, existing, binds, published, finishing=None):
     """The commit to release: --commit; else where an unfinished release
     (--release, or the newest tagged) was started; else, for --release, the
-    last commit on the default branch naming it; else HEAD."""
+    last commit on the default branch naming it; else HEAD. A release is
+    unfinished while a package is unpublished, or while `finishing(release,
+    commit)` says a channel made from a published one is not done."""
     if commit:
         return git("rev-parse", "--verify", f"{commit}^{{commit}}"), "--commit"
     here = load(files_on_disk())
@@ -1923,7 +2101,7 @@ def resolve(commit, wanted, remote, existing, binds, published):
         mine = [p for p in release.packages if existing.get(p.tag) == candidate]
         if not any(binds(p, candidate) for p in mine) or split_from(release, existing, candidate, binds):
             continue
-        if wanted or any(not published(p) for p in release.packages):
+        if wanted or any(not published(p) for p in release.packages) or (finishing and finishing(release, candidate)):
             return candidate, f"release {target} is already tagged there"
     if wanted:
         branch = here.branch
@@ -1945,8 +2123,13 @@ def local_tag(name):
                           cwd=root(), text=True, capture_output=True).stdout.strip()
 
 
-def wait_for(tag_name, packages, timeout, status=published_on, run=run_of, sleep=time.sleep, stale=None):
-    """Return once the release run succeeded and every package is published."""
+def wait_for(tag_name, packages, timeout, status=published_on, run=run_of, sleep=time.sleep, stale=None,
+             channels=(), channel_status=None, settle=10):
+    """Return once the release run succeeded and every package is published.
+    `channels` are (package, channel) pairs made from a release; once the rest
+    is done they are polled up to `settle` more times, and any not done then is
+    named (a run that succeeds without finishing one, e.g. Homebrew without a
+    tap token, is not waited on for hours)."""
     deadline = time.monotonic() + timeout
     while True:
         missing = [p for p in packages if not status(p)]
@@ -1959,7 +2142,16 @@ def wait_for(tag_name, packages, timeout, status=published_on, run=run_of, sleep
                                "then run `release.py tag` again: it pushes the tag again and the new run "
                                "publishes only what is still due.")
         if not missing and (latest is None or latest["status"] == "completed"):
+            unfinished = [(p, c, state) for p, c in channels if (state := channel_status(p, c)) not in DONE]
+            if unfinished and settle > 0 and time.monotonic() <= deadline:
+                settle -= 1
+                sleep(30)
+                continue
             print(f"{tag_name}: published " + ", ".join(str(p) for p in packages), flush=True)
+            for package, channel, state in unfinished:
+                print(f"note   {channel} of {package} is {state}, not done: see the run's publish-{channel} job. "
+                      "Fix the cause (a missing token or a rejected package), then run `release.py tag` again "
+                      f"to finish it.", flush=True)
             return
         if time.monotonic() > deadline:
             still = latest and latest["status"] != "completed"
@@ -1971,8 +2163,10 @@ def wait_for(tag_name, packages, timeout, status=published_on, run=run_of, sleep
 
 
 def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
-        status=published_on, run=run_of, wait=wait_for):
-    """Tag the release on its commit and wait for it to be published."""
+        status=published_on, run=run_of, wait=wait_for, channel_status=channel_state):
+    """Tag the release on its commit and wait for it to be published. A
+    published package whose derived channels (Homebrew, Chocolatey) are not
+    done is finished: the release tag is pushed again with only them due."""
     existing = remote_tags(remote)
 
     def binds(package, tagged):
@@ -1985,7 +2179,20 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
     if foreign := not_its_own(here, existing, None, remote, unpublished):
         raise RuntimeError(foreign_error(foreign, existing))
 
-    sha, why = resolve(commit, wanted, remote, existing, binds, status)
+    def finishing(release, candidate):
+        # A newer release on HEAD replaces an older one's formula and package:
+        # going back to finish them would publish a downgrade.
+        pending = {p: c for p in release.packages if existing.get(p.tag) == candidate and status(p)
+                   and (c := pending_channels(p, lambda q, ch: channel_status(q, ch, candidate)))}
+        if pending and version_key(here.name) > version_key(release.name):
+            print(f"note   release {release.name} has channels not done ("
+                  + "; ".join(f"{p}: {', '.join(c)}" for p, c in pending.items())
+                  + f"), but HEAD names release {here.name}: run `tag --release {release.name}` to finish them",
+                  flush=True)
+            return False
+        return bool(pending)
+
+    sha, why = resolve(commit, wanted, remote, existing, binds, status, finishing)
     read = files_at(sha)
     release = load(read)
     if subprocess.run(["git", "merge-base", "--is-ancestor", sha, f"{remote}/{release.branch}"],
@@ -1999,10 +2206,21 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
         raise RuntimeError(split_error(sha, split))
     print(f"Release {release.name} from {sha} ({why})", flush=True)
 
-    deletions, records, due = [], [], []
+    deletions, records, due, channels = [], [], [], {}
     for package in release.packages:
         if status(package):
-            print(f"skip   {package.tag}: {package} is already published", flush=True)
+            # Its upload is done; the channels made from it may not be. They
+            # are finished from the commit it was released from.
+            pending = {}
+            if existing.get(package.tag) == sha:
+                pending = pending_channels(package, lambda p, c: channel_status(p, c, sha))
+            if not pending:
+                print(f"skip   {package.tag}: {package} is already published", flush=True)
+                continue
+            print(f"finish {package.tag}: {package} is published; "
+                  + ", ".join(f"{c} is {state} ({RETRY[c]})" for c, state in pending.items()), flush=True)
+            due.append(package)
+            channels[package] = list(pending)
             continue
         tagged = existing.get(package.tag)
         if tagged and tagged != sha:
@@ -2023,6 +2241,7 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
             print(f"tag    {package.tag} at {sha[:12]} (a record)", flush=True)
             records.append((package.tag, tag_message(str(package), release, sha)))
         due.append(package)
+        channels[package] = channels_of(package)
     if not due:
         print(f"Every package of release {release.name} is published.")
         return
@@ -2038,7 +2257,10 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
               flush=True)
         deletions.append(release.tag)
         tagged = None
-    elif tagged and latest and latest["status"] == "completed" and latest["conclusion"] != "success":
+    elif tagged and latest and latest["status"] == "completed" and (
+            latest["conclusion"] != "success" or all(status(p) for p in due)):
+        # A run that succeeded is run again only to finish derived channels:
+        # everything due is published, so the new run uploads nothing else.
         print(f"retag  {release.tag}: its run ended {latest['conclusion']}; the new run publishes only what "
               "is still due", flush=True)
         deletions.append(release.tag)
@@ -2046,10 +2268,12 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
     if tagged:
         print(f"wait   {release.tag}: already tagged here", flush=True)
     else:
-        subjects = "".join(f"{p}\n" for p in due)
+        subjects = "".join(f"{p}\n" if channels[p] == channels_of(p) else f"{p}: {', '.join(channels[p])}\n"
+                           for p in due)
         start = (release.tag, tag_message(f"Release {release.name}\n\n{subjects}".rstrip(), release, sha))
         print(f"tag    {release.tag} at {sha[:12]} (starts the release run: "
-              + ", ".join(p.name for p in due) + ")", flush=True)
+              + ", ".join(p.name if channels[p] == channels_of(p) else f"{p.name} ({', '.join(channels[p])})"
+                          for p in due) + ")", flush=True)
 
     if dry_run:
         print("Dry run: nothing was tagged.")
@@ -2067,10 +2291,12 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
     if start:
         git("push", remote, f"refs/tags/{start[0]}", capture=False)
         print(f"pushed {start[0]}; waiting for the release run", flush=True)
-    wait(release.tag, due, timeout, status, stale=stale)
+    wait(release.tag, due, timeout, status, stale=stale,
+         channels=[(p, c) for p in due for c in channels[p] if c in CHANNEL_KEYS],
+         channel_status=lambda p, c: channel_status(p, c, sha))
 
 
-def status_lines(read=None, status=published_on, remote="origin"):
+def status_lines(read=None, status=published_on, remote="origin", channel_status=channel_state):
     release = load(read or files_on_disk())
     try:
         existing = remote_tags(remote)
@@ -2080,9 +2306,14 @@ def status_lines(read=None, status=published_on, remote="origin"):
              f"{existing[release.tag][:12] if release.tag in existing else 'not tagged'})"]
     for package in release.packages:
         tagged = existing.get(package.tag)
+        published = status(package)
         lines.append(f"  {str(package):<48} {package.tag:<28} "
                      f"{'tagged ' + tagged[:12] if tagged else 'untagged':<20} "
-                     f"{'published' if status(package) else 'due'}")
+                     f"{'published' if published else 'due'}")
+        # The channels made from its release: due until it is out, then read live.
+        for channel in channels_of(package)[1:]:
+            state = channel_status(package, channel, tagged) if published else "due"
+            lines.append(f"    {channel:<46} {RETRY[channel]:<49} {state}")
     return lines
 
 

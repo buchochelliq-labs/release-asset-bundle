@@ -47,7 +47,12 @@ release.py status
 
 Prints the release, its tag and where the tag is on the remote, then one line
 per package: the package, its record tag, the commit that tag is on (or
-`untagged`), and `published` or `due`.
+`untagged`), and `published` or `due`. Under a `github` package with
+`homebrew` or `chocolatey`, one line per such channel gives its
+[retry policy](recovery.md#what-each-channel-allows-again-the-retry-policy)
+and its state, read live once the release is out: `merged`, `proposed`,
+`prerelease` or `due` for Homebrew; `listed`, `submitted`, `rejected` or `due`
+for Chocolatey.
 
 ```text
 Release 0.2.0 (tag release-0.2.0: not tagged)
@@ -78,7 +83,9 @@ Tags the release and waits for its run to publish it.
 1. `--commit`, if given.
 2. Otherwise, a release that is already tagged and not finished: the one named
    by `--release`, or else the newest tagged release (by version) if it
-   still has a due package. `tag` goes back to that commit. A tag whose run
+   still has a due package, or a published `github` package whose Homebrew
+   or Chocolatey channel is not done (only while `HEAD` names that release;
+   otherwise it prints a `note`). `tag` goes back to that commit. A tag whose run
    provably published nothing does not hold its commit.
 3. Otherwise, with `--release`, the last commit on `<remote>/<branch>`
    (first-parent history) whose `release-kit.yml` names that release.
@@ -96,7 +103,8 @@ be split (rule 4).
 
 | Line | Meaning |
 |---|---|
-| `skip   <tag>` | the package is already published |
+| `skip   <tag>` | the package is already published, and so is every channel made from it |
+| `finish <tag>` | the package is published, but a channel made from it (`homebrew`, `chocolatey`) is not done; it is due again, alone |
 | `keep   <tag>` | the record tag is already on this commit |
 | `tag    <tag>` | a new record tag on this commit |
 | `move   <tag>` | the record tag is on another commit whose run published nothing; it is moved here |
@@ -108,7 +116,7 @@ Then the release tag:
 |---|---|
 | `tag    release-X` | a new release tag, which starts the run |
 | `move   release-X` | it was on another commit whose run ended before publishing; it is moved here |
-| `retag  release-X` | it is on this commit but its run failed; it is pushed again, starting a new run that publishes only what is still due |
+| `retag  release-X` | it is on this commit but its run failed (or succeeded with only channels left to finish); it is pushed again, starting a new run that publishes only what is still due |
 | `wait   release-X` | it is on this commit and its run is live (or succeeded); `tag` only waits |
 
 Tags are annotated. A record tag's message is:
@@ -128,7 +136,9 @@ atomic push, then pushes the release tag on its own (GitHub starts no workflow
 for a push of more than three tags).
 
 **Waiting.** `tag` then polls every 30 seconds until the run has succeeded and
-every due package is on its registry. If the run fails, it stops and says how
+every due package is on its registry. Then it polls the due `homebrew` and
+`chocolatey` channels up to ten more times, and names any not done in a
+`note` instead of waiting longer. If the run fails, it stops and says how
 many packages were published. If `--timeout` passes while the run is still
 going, it says so and names the run; run `tag` again to keep waiting. Running
 `tag` while a run is live changes nothing: it prints `wait` and waits.
@@ -171,8 +181,16 @@ package, in `release-kit.yml` order:
 
 ```json
 [{"name": "onto", "registry": "crates.io", "version": "0.2.0",
-  "manifest": "crates/onto/Cargo.toml", "tag": "onto-v0.2.0", "slug": "onto"}]
+  "manifest": "crates/onto/Cargo.toml", "tag": "onto-v0.2.0", "slug": "onto",
+  "channels": ["crates.io"]}]
 ```
+
+`channels` lists what is due for the package: its registry, then for a
+`github` package the `homebrew` and `chocolatey` channels it has. A published
+`github` package selected only to finish a channel lists just that channel:
+`plan`, `preflight`, `verify` and `consume` leave it out of its registry, and
+`publish-github` skips it. A selection without `channels` (from an older
+gate) means every channel.
 
 Commands that write outputs append `key=value` lines to the file named by
 `GITHUB_OUTPUT`.
@@ -198,10 +216,13 @@ It refuses unless:
 5. the tag's message records `Release: <name>` and `Commit: <sha>`;
 6. no unpublished package's tag on the remote belongs to something else;
 7. the release is not split;
-8. at least one package is due;
+8. at least one package is due, or a channel made from a published
+   `github` package whose record tag is on the commit (see
+   [the retry policy](recovery.md#what-each-channel-allows-again-the-retry-policy));
 9. every due package's record tag is on the commit, and annotated.
 
-It prints `selected` or `not selected` for each package.
+It prints `selected`, `selected for <channel> (<state>)` or `not selected`
+for each package.
 
 With `--verify-only`, steps 7–9 are replaced: it selects every package whose
 record tag is on the commit, and refuses if none is, or if any of them is not
@@ -215,7 +236,8 @@ Outputs:
 | `release` | the release's name |
 | `selection` | the selection (JSON) |
 | `verify-only` | `true` or `false` |
-| `github`, `crates-io`, `pypi`, `npm`, `vscode` | `true` when the selection has a package of that registry |
+| `github`, `crates-io`, `pypi`, `npm`, `vscode` | `true` when the selection has a package of that registry due on it (not one selected only for its channels) |
+| `homebrew`, `chocolatey` | `true` when a selected package has that channel due |
 
 ### `plan`
 

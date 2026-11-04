@@ -76,8 +76,9 @@ with the job's token.
 Checks out `refs/tags/<tag>` with full history (`fetch-depth: 0`) and runs
 the [`gate`](commands.md#gate) action. The tag is `inputs.tag` on a dispatch,
 else the pushed tag. Its outputs are the job's outputs: `sha`, `release`,
-`selection`, `verify-only`, and one flag per registry (`github`, `crates-io`,
-`pypi`, `npm`, `vscode`).
+`selection`, `verify-only`, one flag per registry (`github`, `crates-io`,
+`pypi`, `npm`, `vscode`), and one per channel made from a GitHub release
+(`homebrew`, `chocolatey`).
 
 If the gate refuses, nothing else runs.
 

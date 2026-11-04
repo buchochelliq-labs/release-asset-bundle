@@ -107,8 +107,8 @@ unknown `outcome` as not published.
 
 | Value | Meaning |
 |---|---|
-| `complete` | every selected package is on its registry, and its publish job succeeded (in a verify-only run: was verified) |
-| `partial` | this run published some selected packages, but not all, or a published package's job failed afterwards (in `verify` or `consume`) |
+| `complete` | every selected package is on its registry, its publish job succeeded (in a verify-only run: was verified), and so did the jobs of the channels due for it (`channels`; not in a verify-only run, which runs none) |
+| `partial` | this run published some selected packages or channels, but not all, or a published package's job failed afterwards (in `verify` or `consume`) |
 | `nothing-published` | this run published none of them: it failed before publishing, its uploads all failed, the gate refused, or a verify-only run failed |
 | `unknown` | nothing is known to be published, and a registry did not answer for at least one package |
 
@@ -120,18 +120,18 @@ unknown `outcome` as not published.
 | `tag` | its record tag |
 | `selected` | whether the gate selected it for this run |
 | `outcome` | see below |
-| `job` | its publish job's result (`publish-crates` for a crate, and so on), or `null` if not selected |
+| `job` | its publish job's result (`publish-crates` for a crate, and so on), or `null` if not selected or selected only to finish its channels |
 | `url` | where its registry serves this version, when `outcome` is `published` or `already-published`; else `null` |
 | `files` | the files this run built for it: `name`, `sha256` and `size` |
 | `open_vsx_url` | a `vscode` package with [`open-vsx: true`](registries/vscode.md) only: Open VSX's page for this version (`https://open-vsx.org/extension/<publisher>/<name>/<version>`) when `url` is set, else `null`. Such a package counts as published only once both registries have it, so one the Marketplace has but Open VSX lacks is `failed` (or `skipped`) with both `null` |
-| `channels` | a selected `github` package with `homebrew` or `chocolatey`: those jobs' results |
+| `channels` | a selected `github` package with `homebrew` or `chocolatey`: the results of those jobs, for the channels due for it in this run |
 
 `outcome`:
 
 | Value | Meaning |
 |---|---|
 | `published` | this run put it on its registry |
-| `already-published` | it was on its registry before this run: the gate did not select it because it was published, or a verify-only run verified it |
+| `already-published` | it was on its registry before this run: the gate did not select it because it was published, selected it only to finish the Homebrew or Chocolatey channel made from its release (see [the retry policy](recovery.md#what-each-channel-allows-again-the-retry-policy)), or a verify-only run verified it |
 | `failed` | selected, its publish job failed or was cancelled, and its registry does not have it |
 | `skipped` | this run did not publish it or check it: its publish job was skipped (the gate refused, CI or the build failed), or a verify-only run did not select it |
 | `unknown` | its publish job did not succeed, and its registry did not answer whether it has it |
@@ -141,6 +141,11 @@ version on its registry (and `consume` used it). When the job did not
 succeed, the `record` job asks the registry itself, the way `verify` does: a
 job can fail after uploading, and then the package is `published` but the
 `result` is not `complete`.
+
+A run that `tag` started only to finish a release's channels selects its
+`github` package with `channels` naming just those: the record shows it
+`already-published`, with `job: null`, no `files`, and `channels` holding
+the channel jobs' results, which decide `result`.
 
 `url`, per registry:
 

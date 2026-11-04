@@ -81,7 +81,7 @@
         "nothing-published",
         "unknown"
       ],
-      "description": "complete: every selected package is on its registry and its publish job succeeded; partial: this run published some of them; nothing-published: this run published none; unknown: a registry did not answer"
+      "description": "complete: every selected package is on its registry, its publish job and the jobs of the channels due for it succeeded; partial: this run published some of them; nothing-published: this run published none; unknown: a registry did not answer"
     },
     "jobs": {
       "type": "object",
@@ -152,7 +152,7 @@
               "skipped",
               null
             ],
-            "description": "its publish job's result; null when not selected"
+            "description": "its publish job's result; null when not selected, or selected only to finish its channels"
           },
           "url": {
             "type": [
@@ -195,7 +195,7 @@
           },
           "channels": {
             "type": "object",
-            "description": "a selected github package's homebrew and chocolatey jobs: their results",
+            "description": "a selected github package's homebrew and chocolatey jobs, those due for it in this run: their results",
             "additionalProperties": {
               "enum": [
                 "success",
