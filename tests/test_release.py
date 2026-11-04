@@ -1191,6 +1191,52 @@ class ReleaseRecord(unittest.TestCase):
         self.assertEqual({p["outcome"] for p in document["packages"]}, {"skipped"})
         self.assertEqual((document["release"], document["result"]), ("0.2.0", "nothing-published"))
 
+    def test_a_vscode_package_with_open_vsx_is_published_only_on_both(self):
+        # #17 with #18: the record asks both registries for an extension with
+        # open-vsx: true, and gives Open VSX's page too.
+        self.FILES = {
+            "ext/package.json": json.dumps({"name": "ext", "publisher": "org", "version": "1.0.0"}),
+            "release-kit.yml": "packages:\n  - name: org.ext\n    registry: vscode\n"
+                               "    manifest: ext/package.json\n    version: '1.0.0'\n"
+                               "    artifacts: [{kind: vsix}]\n    open-vsx: true\n",
+        }
+        self.write("release--org.ext--org.ext-vsix", "ext-1.0.0.vsix", b"vsix")
+        selection = json.dumps([{"name": "org.ext", "registry": "vscode", "version": "1.0.0",
+                                 "manifest": "ext/package.json", "tag": "org.ext-v1.0.0", "slug": "org.ext",
+                                 "open-vsx": True}])
+        on = {"marketplace": True, "open-vsx": True}
+        self.status = release.published_on  # the real check, over the faked registries below
+
+        def http(url, data=None, headers=None):
+            if url.startswith("https://marketplace.visualstudio.com/"):
+                versions = [{"version": "1.0.0"}] if on["marketplace"] else []
+                return 200, json.dumps({"results": [{"extensions": [{"versions": versions}]}]}).encode()
+            self.assertEqual(url, "https://open-vsx.org/api/org/ext/1.0.0")
+            return (200, b"{}") if on["open-vsx"] else (404, b"")
+
+        with unittest.mock.patch.object(release, "http_status", side_effect=http):
+            done = self.record(selection, self.needs(publish_vscode="success"))["packages"][0]
+            self.assertEqual((done["outcome"], done["url"], done["open_vsx_url"], [f["name"] for f in done["files"]]),
+                             ("published", "https://marketplace.visualstudio.com/items?itemName=org.ext",
+                              "https://open-vsx.org/extension/org/ext/1.0.0", ["ext-1.0.0.vsix"]))
+            # The Marketplace upload went through, then Open VSX's failed.
+            on["open-vsx"] = False
+            document = self.record(selection, self.needs(publish_vscode="failure"))
+            half = document["packages"][0]
+            self.assertEqual((half["outcome"], half["url"], half["open_vsx_url"], document["result"]),
+                             ("failed", None, None, "nothing-published"),
+                             "on the Marketplace alone it is not published: a re-run finishes Open VSX")
+            on["open-vsx"] = True
+            late = self.record(selection, self.needs(publish_vscode="failure"))
+            self.assertEqual((late["packages"][0]["outcome"], late["result"]), ("published", "partial"))
+            # Without open-vsx: true, Open VSX is neither asked nor recorded.
+            self.FILES = dict(self.FILES, **{"release-kit.yml": self.FILES["release-kit.yml"].replace(
+                "    open-vsx: true\n", "")})
+            on["open-vsx"] = False
+            plain = self.record(selection.replace(', "open-vsx": true', ""), self.needs(publish_vscode="failure"))
+        self.assertEqual(plain["packages"][0]["outcome"], "published")
+        self.assertNotIn("open_vsx_url", plain["packages"][0])
+
     def test_a_publish_job_the_record_job_does_not_need_is_an_error(self):
         needs = json.loads(self.needs())
         del needs["publish-crates"]

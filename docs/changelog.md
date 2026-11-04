@@ -52,7 +52,9 @@ a package published to Open VSX: without it, the upload still happens when
 commit, the run, each job's result, and every package's outcome
 (`published`, `already-published`, `failed`, `skipped` or `unknown`), its
 registry URL and the SHA-256 of the files built for it, with an overall
-`result` (`complete`, `partial`, `nothing-published`). A coordinator
+`result` (`complete`, `partial`, `nothing-published`). A `vscode` package
+with `open-vsx: true` counts as published only on both registries, and also
+gets `open_vsx_url`. A coordinator
 releasing a project across repositories downloads it with `gh run download
 <run> -n release-record`. A new last job in the template, `record`, writes it
 with the new `release.py record` command, even when publishing fails, with no

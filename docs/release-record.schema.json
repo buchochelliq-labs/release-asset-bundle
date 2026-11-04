@@ -186,6 +186,13 @@
               }
             }
           },
+          "open_vsx_url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "a vscode package with open-vsx: true: where Open VSX serves this version; null when it does not"
+          },
           "channels": {
             "type": "object",
             "description": "a selected github package's homebrew and chocolatey jobs: their results",

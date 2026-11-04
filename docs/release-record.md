@@ -123,6 +123,7 @@ unknown `outcome` as not published.
 | `job` | its publish job's result (`publish-crates` for a crate, and so on), or `null` if not selected |
 | `url` | where its registry serves this version, when `outcome` is `published` or `already-published`; else `null` |
 | `files` | the files this run built for it: `name`, `sha256` and `size` |
+| `open_vsx_url` | a `vscode` package with [`open-vsx: true`](registries/vscode.md) only: Open VSX's page for this version (`https://open-vsx.org/extension/<publisher>/<name>/<version>`) when `url` is set, else `null`. Such a package counts as published only once both registries have it, so one the Marketplace has but Open VSX lacks is `failed` (or `skipped`) with both `null` |
 | `channels` | a selected `github` package with `homebrew` or `chocolatey`: those jobs' results |
 
 `outcome`:

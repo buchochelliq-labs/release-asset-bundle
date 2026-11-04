@@ -1609,6 +1609,9 @@ RECORD_SCHEMA = {
                             },
                         },
                     },
+                    "open_vsx_url": {"type": ["string", "null"],
+                                     "description": "a vscode package with open-vsx: true: where Open VSX "
+                                                    "serves this version; null when it does not"},
                     "channels": {"type": "object",
                                  "description": "a selected github package's homebrew and chocolatey "
                                                 "jobs: their results",
@@ -1666,6 +1669,12 @@ def registry_url(package, repo):
         "npm": f"https://www.npmjs.com/package/{quote(name, safe='@/')}/v/{quote(version)}",
         "vscode": f"https://marketplace.visualstudio.com/items?itemName={quote(name)}",
     }[package.registry]
+
+
+def open_vsx_url(package):
+    """The page where Open VSX serves an extension's version."""
+    publisher, _, name = package.name.partition(".")
+    return f"https://open-vsx.org/extension/{quote(publisher)}/{quote(name)}/{quote(package.version)}"
 
 
 def built_files(dist, slug):
@@ -1755,6 +1764,9 @@ def record(tag_name, sha, selection, verify_only, needs, dist="dist", read=None,
                  "tag": package.tag, "selected": selected, "outcome": outcome, "job": job,
                  "url": registry_url(package, repo) if outcome in ("published", "already-published") else None,
                  "files": files}
+        if package.registry == "vscode" and package.open_vsx is True:
+            # Published means on both registries (published_on), so both pages serve it.
+            entry["open_vsx_url"] = open_vsx_url(package) if entry["url"] else None
         if channels:
             entry["channels"] = channels
         packages.append(entry)
