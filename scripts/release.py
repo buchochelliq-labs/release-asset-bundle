@@ -54,6 +54,10 @@ Commands (the gate action, in CI):
                 package from its templates and its release's checksums.
     homebrew-tap --tap DIR --formula FILE --repo OWNER/TAP --version V --release-url URL
                 put the formula on a branch of the tap and open a pull request.
+    record --tag TAG --sha SHA --selection JSON --verify-only B --needs JSON
+                the run's release record (release-record.json): the release,
+                its commit, the run, and each package's outcome, files and
+                registry URL. The workflow's last job writes it, always.
 
 Commands (installing):
     install     from a release-kit checkout, copy the kit into the repository
@@ -1526,6 +1530,263 @@ def consume(registry, selection, runner=None, read=None, tries=10, sleep=time.sl
 
 
 # ---------------------------------------------------------------------------
+# The release record: one JSON file per run, for coordinators
+
+# Its schema, versioned: `schema_version` changes only when a field is removed,
+# renamed or changes meaning; new fields may appear without it, so readers
+# ignore what they do not know. docs/release-record.schema.json is this, as
+# `release.py record --schema` prints it (a test keeps them equal).
+RECORD_VERSION = 1
+OUTCOMES = ("published", "already-published", "failed", "skipped", "unknown")
+RESULTS = ("complete", "partial", "nothing-published", "unknown")
+JOB_RESULTS = ("success", "failure", "cancelled", "skipped")
+# The release.yml job that publishes each registry, and those that make a
+# github package's channels.
+PUBLISH_JOBS = {"github": "publish-github", "crates.io": "publish-crates", "pypi": "publish-pypi",
+                "npm": "publish-npm", "vscode": "publish-vscode"}
+CHANNEL_JOBS = {"homebrew": "publish-homebrew", "chocolatey": "publish-chocolatey"}
+RECORD_SCHEMA = {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "$id": "https://buchochelliq-labs.github.io/release-kit/release-record.schema.json",
+    "title": "release-kit release record",
+    "description": "What one release run set out to publish, and what came of it.",
+    "type": "object",
+    "required": ["schema_version", "repository", "release", "tag", "commit", "verify_only", "run",
+                 "result", "jobs", "packages"],
+    "properties": {
+        "schema_version": {"const": RECORD_VERSION},
+        "repository": {"type": "string", "description": "owner/name"},
+        "release": {"type": ["string", "null"],
+                    "description": "the release's name; null if release-kit.yml could not be read"},
+        "tag": {"type": "string", "description": "the release tag the run was for"},
+        "commit": {"type": ["string", "null"], "pattern": "^[0-9a-f]{40}$",
+                   "description": "the tagged commit; null if the tag could not be resolved"},
+        "verify_only": {"type": "boolean"},
+        "run": {
+            "type": "object",
+            "required": ["id", "attempt", "url"],
+            "properties": {
+                "id": {"type": ["integer", "null"]},
+                "attempt": {"type": ["integer", "null"]},
+                "url": {"type": ["string", "null"]},
+            },
+        },
+        "result": {"enum": list(RESULTS),
+                   "description": "complete: every selected package is on its registry and its publish "
+                                  "job succeeded; partial: this run published some of them; "
+                                  "nothing-published: this run published none; unknown: a registry did "
+                                  "not answer"},
+        "jobs": {"type": "object", "description": "the result of each job the record job needs",
+                 "additionalProperties": {"enum": list(JOB_RESULTS)}},
+        "packages": {
+            "type": "array",
+            "description": "every package of release-kit.yml at the tagged commit, in its order",
+            "items": {
+                "type": "object",
+                "required": ["name", "registry", "version", "tag", "selected", "outcome", "job", "url",
+                             "files"],
+                "properties": {
+                    "name": {"type": "string"},
+                    "registry": {"enum": list(REGISTRIES)},
+                    "version": {"type": "string"},
+                    "tag": {"type": "string", "description": "its record tag"},
+                    "selected": {"type": "boolean", "description": "whether the gate selected it"},
+                    "outcome": {"enum": list(OUTCOMES)},
+                    "job": {"enum": [*JOB_RESULTS, None],
+                            "description": "its publish job's result; null when not selected"},
+                    "url": {"type": ["string", "null"],
+                            "description": "where its registry serves this version; null when it does not"},
+                    "files": {
+                        "type": "array",
+                        "description": "the files this run built for it, from the build artifacts",
+                        "items": {
+                            "type": "object",
+                            "required": ["name", "sha256", "size"],
+                            "properties": {
+                                "name": {"type": "string"},
+                                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                                "size": {"type": "integer", "minimum": 0},
+                            },
+                        },
+                    },
+                    "channels": {"type": "object",
+                                 "description": "a selected github package's homebrew and chocolatey "
+                                                "jobs: their results",
+                                 "additionalProperties": {"enum": list(JOB_RESULTS)}},
+                },
+            },
+        },
+    },
+}
+_JSON_TYPES = {"object": dict, "array": list, "string": str, "boolean": bool, "null": type(None)}
+
+
+def _is_type(value, kind):
+    if kind == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    return isinstance(value, _JSON_TYPES[kind]) and (kind == "boolean" or not isinstance(value, bool))
+
+
+def schema_errors(value, schema, where="record"):
+    """What in `value` breaks `schema`, as messages: the JSON Schema keywords
+    RECORD_SCHEMA uses (type, const, enum, pattern, minimum, required,
+    properties, additionalProperties, items), so release.py needs no library."""
+    kinds = schema["type"] if isinstance(schema.get("type"), list) else [schema["type"]] if "type" in schema else []
+    if kinds and not any(_is_type(value, kind) for kind in kinds):
+        return [f"{where}: {value!r} is not {' or '.join(kinds)}"]
+    errors = []
+    if "const" in schema and value != schema["const"]:
+        errors.append(f"{where}: {value!r} is not {schema['const']!r}")
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{where}: {value!r} is not one of {', '.join(map(str, schema['enum']))}")
+    if "pattern" in schema and isinstance(value, str) and not re.search(schema["pattern"], value):
+        errors.append(f"{where}: {value!r} does not match {schema['pattern']}")
+    if "minimum" in schema and _is_type(value, "integer") and value < schema["minimum"]:
+        errors.append(f"{where}: {value} is below {schema['minimum']}")
+    if isinstance(value, dict):
+        errors += [f"{where}: {key} is missing" for key in schema.get("required", []) if key not in value]
+        for key, item in value.items():
+            if key in schema.get("properties", {}):
+                errors += schema_errors(item, schema["properties"][key], f"{where}.{key}")
+            elif isinstance(schema.get("additionalProperties"), dict):
+                errors += schema_errors(item, schema["additionalProperties"], f"{where}.{key}")
+    if isinstance(value, list) and "items" in schema:
+        for index, item in enumerate(value):
+            errors += schema_errors(item, schema["items"], f"{where}[{index}]")
+    return errors
+
+
+def registry_url(package, repo):
+    """The page where `package`'s registry serves its version."""
+    name, version = package.name, package.version
+    return {
+        "github": f"https://github.com/{repo}/releases/tag/{quote(package.tag)}",
+        "crates.io": f"https://crates.io/crates/{quote(name)}/{quote(version)}",
+        "pypi": f"https://pypi.org/project/{quote(name)}/{quote(pep440(version))}/",
+        "npm": f"https://www.npmjs.com/package/{quote(name, safe='@/')}/v/{quote(version)}",
+        "vscode": f"https://marketplace.visualstudio.com/items?itemName={quote(name)}",
+    }[package.registry]
+
+
+def built_files(dist, slug):
+    """[{name, sha256, size}] of the files this run built for a package: every
+    file in `<dist>/release--<slug>--*/` but the `.sha256` ones, each checked
+    against its `.sha256` where the build wrote one (a github package's)."""
+    pattern = re.sub(r"([*?\[])", r"[\1]", f"release--{slug}--") + "*/*"
+    files = []
+    for path in Path(dist).glob(pattern):
+        if not path.is_file() or path.name.endswith(".sha256"):
+            continue
+        sha = hashlib.sha256(path.read_bytes()).hexdigest()
+        sums = Path(f"{path}.sha256")
+        if sums.exists() and parse_sums(sums.read_text(encoding="utf-8")).get(path.name) != sha:
+            raise RuntimeError(f"{path}: its .sha256 does not match the file (SHA-256 {sha})")
+        files.append({"name": path.name, "sha256": sha, "size": path.stat().st_size})
+    return sorted(files, key=lambda f: (f["name"], f["sha256"]))
+
+
+def job_results(needs):
+    """{job: result} from a job's `toJSON(needs)` ({job: {result, outputs}})."""
+    needs = json.loads(needs or "{}") if isinstance(needs, str) else needs
+    return {job: value.get("result") if isinstance(value, dict) else value for job, value in needs.items()}
+
+
+def run_info(repo):
+    """The run this is, from the Actions environment (nulls outside it)."""
+    ident, attempt = os.environ.get("GITHUB_RUN_ID", ""), os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    server = os.environ.get("GITHUB_SERVER_URL", "https://github.com")
+    return {"id": int(ident) if ident.isdigit() else None,
+            "attempt": int(attempt) if attempt.isdigit() else None,
+            "url": f"{server}/{repo}/actions/runs/{ident}" if ident.isdigit() else None}
+
+
+def record(tag_name, sha, selection, verify_only, needs, dist="dist", read=None, status=published_on,
+           repo=None, run=None):
+    """The release record of one run (RECORD_SCHEMA): the release, its commit,
+    the run, its jobs' results, and every package of release-kit.yml with
+    what came of it. The release workflow's last job writes it whatever
+    happened before, so a coordinator can tell a run that published nothing
+    from one that published part of the release. `needs` is that job's
+    `toJSON(needs)`; `selection` and `sha` the gate's outputs (empty when
+    the gate failed). A selected package whose publish job did not succeed
+    is looked up on its registry: a job can fail after uploading."""
+    jobs = job_results(needs)
+    repo = repo or repository()
+    gated = jobs.get("gate") == "success"
+    chosen = {(s["registry"], s["name"]) for s in json.loads(selection or "[]")} if gated else set()
+    if not sha:
+        try:
+            sha = git("rev-parse", "--verify", f"refs/tags/{tag_name}^{{commit}}")
+        except subprocess.CalledProcessError:
+            sha = None
+    try:
+        release = load(read or files_at(sha)) if read or sha else None
+    except (ValueError, RuntimeError, subprocess.CalledProcessError, FileNotFoundError) as error:
+        print(f"cannot read {CONFIG} at {sha}: {error}", flush=True)
+        release = None
+    on_registry = "already-published" if verify_only else "published"
+    packages = []
+    for package in release.packages if release else ():
+        selected = (package.registry, package.name) in chosen
+        job, files, channels = None, [], {}
+        if not selected:
+            # A normal run's gate selects every package that is not yet published.
+            outcome = "already-published" if gated and not verify_only else "skipped"
+        else:
+            name = PUBLISH_JOBS[package.registry]
+            if name not in jobs:
+                raise RuntimeError(f"the record job does not need {name}, which publishes {package}: "
+                                   "add it to the job's `needs`")
+            job = jobs[name]
+            if job == "success":
+                outcome = on_registry
+            else:
+                try:
+                    there = status(package)
+                except (RuntimeError, OSError, ValueError) as error:
+                    print(f"{package}: cannot tell whether it is published: {error}", flush=True)
+                    there = None
+                outcome = ("unknown" if there is None else on_registry if there
+                           else "skipped" if job == "skipped" else "failed")
+            files = built_files(dist, package.slug)
+            channels = {channel: jobs.get(name) or "skipped" for channel, name in CHANNEL_JOBS.items()
+                        if package.registry == "github" and dict(package.github).get(channel)}
+        entry = {"name": package.name, "registry": package.registry, "version": package.version,
+                 "tag": package.tag, "selected": selected, "outcome": outcome, "job": job,
+                 "url": registry_url(package, repo) if outcome in ("published", "already-published") else None,
+                 "files": files}
+        if channels:
+            entry["channels"] = channels
+        packages.append(entry)
+    mine = [p for p in packages if p["selected"]]
+    if mine and all(p["outcome"] == on_registry and p["job"] == "success" for p in mine):
+        result = "complete"
+    elif any(p["outcome"] == "published" for p in mine):
+        result = "partial"
+    elif any(p["outcome"] == "unknown" for p in mine):
+        result = "unknown"
+    else:
+        result = "nothing-published"
+    document = {"schema_version": RECORD_VERSION, "repository": repo,
+                "release": release.name if release else None, "tag": tag_name, "commit": sha or None,
+                "verify_only": bool(verify_only), "run": run or run_info(repo), "result": result,
+                "jobs": jobs, "packages": packages}
+    if errors := schema_errors(document, RECORD_SCHEMA):
+        raise RuntimeError("the release record breaks its schema:\n  " + "\n  ".join(errors))
+    return document
+
+
+def record_lines(document):
+    """The record for a person: one line for the run, one per package."""
+    lines = [f"release {document['release']} ({document['tag']}): {document['result']}"]
+    for package in document["packages"]:
+        job = f" (publish job: {package['job']})" if package["job"] else ""
+        lines.append(f"  {package['name']} {package['version']} on {package['registry']}: "
+                     f"{package['outcome']}{job}")
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Installing: repositories use a copy of the kit, pinned and reviewable: a
 # repository's release changes only when it installs a newer kit.
 
@@ -1870,6 +2131,16 @@ def main(argv=None):
     publisher = commands.add_parser("publish-crates")
     publisher.add_argument("--selection", required=True)
     publisher.add_argument("--new-crates", default="[]", help="preflight's new_crates output (JSON)")
+    recorder = commands.add_parser("record")
+    recorder.add_argument("--tag", help="the release tag the run was for")
+    recorder.add_argument("--sha", default="", help="the gate's sha output (empty if the gate failed)")
+    recorder.add_argument("--selection", default="", help="the gate's selection output")
+    recorder.add_argument("--verify-only", default="", choices=["true", "false", ""],
+                          help="the gate's verify-only output")
+    recorder.add_argument("--needs", default="{}", help="the record job's toJSON(needs)")
+    recorder.add_argument("--dist", default="dist", help="where the build artifacts were downloaded")
+    recorder.add_argument("--out", default="release-record.json")
+    recorder.add_argument("--schema", action="store_true", help="print the record's JSON Schema and stop")
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
@@ -1919,6 +2190,20 @@ def main(argv=None):
             # Tokens come from the environment, never the command line.
             publish_crates(args.selection, args.new_crates, os.environ.get("RELEASE_TRUSTED_TOKEN", ""),
                            os.environ.get("RELEASE_NEW_CRATE_TOKEN", ""))
+        elif args.command == "record":
+            if args.schema:
+                print(json.dumps(RECORD_SCHEMA, indent=2))
+                return 0
+            if not args.tag:
+                parser.error("record needs --tag")
+            document = record(args.tag, args.sha, args.selection, args.verify_only == "true", args.needs,
+                              args.dist)
+            Path(args.out).write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+            lines = record_lines(document)
+            print("\n".join(lines + [f"wrote {args.out}"]))
+            if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+                with open(summary, "a", encoding="utf-8") as handle:
+                    handle.write("### Release record\n\n```text\n" + "\n".join(lines) + "\n```\n")
     except (RuntimeError, ValueError, subprocess.CalledProcessError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

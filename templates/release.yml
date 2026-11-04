@@ -308,3 +308,46 @@ jobs:
           vsce-token: ${{ secrets.VSCE_PAT }}
           ovsx-token: ${{ secrets.OVSX_PAT }}
           verify-only: ${{ needs.gate.outputs.verify-only }}
+
+  # The run's release record, release-record.json, uploaded as the artifact
+  # `release-record`: the release, its commit, and each package's outcome,
+  # files and registry URL, for a coordinator (`gh run download <run> -n
+  # release-record`). It runs whatever happened before it, so a run that
+  # failed halfway still says what it published. Keep every publish job in
+  # its `needs`.
+  record:
+    needs: [gate, ci, build, publish-github, publish-homebrew, publish-chocolatey, publish-crates,
+            publish-pypi, publish-npm, publish-vscode]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - run: python3 -m pip install --quiet pyyaml
+      # The files each package was built into, for their SHA-256.
+      - if: needs.build.result != 'skipped'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: release--*
+          path: dist
+      - env:
+          # Reads a private repository's GitHub releases (contents: read).
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          SHA: ${{ needs.gate.outputs.sha }}
+          SELECTION: ${{ needs.gate.outputs.selection }}
+          VERIFY_ONLY: ${{ needs.gate.outputs.verify-only }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: >-
+          python3 .github/release-kit/scripts/release.py record --tag "$TAG" --sha "$SHA"
+          --selection "$SELECTION" --verify-only "$VERIFY_ONLY" --needs "$NEEDS" --out release-record.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-record
+          path: release-record.json
+          if-no-files-found: error

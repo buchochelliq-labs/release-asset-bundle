@@ -52,6 +52,7 @@ nav:
   - Commands: commands.md
   - The workflow: workflow.md
   - Recovering a failed release: recovery.md
+  - The release record: release-record.md
   - Registries:
       - registries/index.md
       - GitHub Releases: registries/github.md

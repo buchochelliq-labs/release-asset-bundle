@@ -1,0 +1,205 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://buchochelliq-labs.github.io/release-kit/release-record.schema.json",
+  "title": "release-kit release record",
+  "description": "What one release run set out to publish, and what came of it.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "repository",
+    "release",
+    "tag",
+    "commit",
+    "verify_only",
+    "run",
+    "result",
+    "jobs",
+    "packages"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "repository": {
+      "type": "string",
+      "description": "owner/name"
+    },
+    "release": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "the release's name; null if release-kit.yml could not be read"
+    },
+    "tag": {
+      "type": "string",
+      "description": "the release tag the run was for"
+    },
+    "commit": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "the tagged commit; null if the tag could not be resolved"
+    },
+    "verify_only": {
+      "type": "boolean"
+    },
+    "run": {
+      "type": "object",
+      "required": [
+        "id",
+        "attempt",
+        "url"
+      ],
+      "properties": {
+        "id": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "attempt": {
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "url": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "result": {
+      "enum": [
+        "complete",
+        "partial",
+        "nothing-published",
+        "unknown"
+      ],
+      "description": "complete: every selected package is on its registry and its publish job succeeded; partial: this run published some of them; nothing-published: this run published none; unknown: a registry did not answer"
+    },
+    "jobs": {
+      "type": "object",
+      "description": "the result of each job the record job needs",
+      "additionalProperties": {
+        "enum": [
+          "success",
+          "failure",
+          "cancelled",
+          "skipped"
+        ]
+      }
+    },
+    "packages": {
+      "type": "array",
+      "description": "every package of release-kit.yml at the tagged commit, in its order",
+      "items": {
+        "type": "object",
+        "required": [
+          "name",
+          "registry",
+          "version",
+          "tag",
+          "selected",
+          "outcome",
+          "job",
+          "url",
+          "files"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "registry": {
+            "enum": [
+              "github",
+              "crates.io",
+              "pypi",
+              "npm",
+              "vscode"
+            ]
+          },
+          "version": {
+            "type": "string"
+          },
+          "tag": {
+            "type": "string",
+            "description": "its record tag"
+          },
+          "selected": {
+            "type": "boolean",
+            "description": "whether the gate selected it"
+          },
+          "outcome": {
+            "enum": [
+              "published",
+              "already-published",
+              "failed",
+              "skipped",
+              "unknown"
+            ]
+          },
+          "job": {
+            "enum": [
+              "success",
+              "failure",
+              "cancelled",
+              "skipped",
+              null
+            ],
+            "description": "its publish job's result; null when not selected"
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "where its registry serves this version; null when it does not"
+          },
+          "files": {
+            "type": "array",
+            "description": "the files this run built for it, from the build artifacts",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "sha256",
+                "size"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "size": {
+                  "type": "integer",
+                  "minimum": 0
+                }
+              }
+            }
+          },
+          "channels": {
+            "type": "object",
+            "description": "a selected github package's homebrew and chocolatey jobs: their results",
+            "additionalProperties": {
+              "enum": [
+                "success",
+                "failure",
+                "cancelled",
+                "skipped"
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}

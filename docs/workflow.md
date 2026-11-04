@@ -10,6 +10,7 @@ gate ──▶ ci ──▶ build ──┬──▶ publish-github
                         ├──▶ publish-vscode
                         ├──▶ publish-crates
                         └──▶ publish-npm
+                                    ...all of them ──▶ record (always)
 ```
 
 ## Triggers
@@ -47,6 +48,7 @@ jobs get more:
 | `publish-pypi` | `contents: read`, `id-token: write` | `pypi` |
 | `publish-npm` | `contents: read`, `id-token: write` | `npm` |
 | `publish-vscode` | `contents: read` (default) | `vscode-marketplace` |
+| `record` | `contents: read` (default) | none |
 
 `id-token: write` lets a job request an OIDC token for Trusted Publishing.
 Environments hold the secrets and are what the registries' trusted publishers
@@ -148,10 +150,27 @@ is selected, and passes `CARGO_REGISTRY_TOKEN` only when a new one is; see
 npm registry, runs `npm ci` at the repository root (not in a verify-only run),
 and runs its action.
 
+### `record`
+
+```yaml
+  record:
+    needs: [gate, ci, build, publish-github, publish-homebrew, publish-chocolatey, publish-crates,
+            publish-pypi, publish-npm, publish-vscode]
+    if: always()
+```
+
+Runs last, whatever happened before it, even in a cancelled run. It checks
+out the release tag, downloads the build artifacts (unless the build was
+skipped), runs [`record`](commands.md#record) with the gate's outputs and
+`toJSON(needs)`, and uploads `release-record.json` as the artifact
+`release-record`. See [The release record](release-record.md).
+
 ### Adding your own jobs
 
 Keep repository-specific checks (for example `cargo-semver-checks`) as jobs
-in `release.yml` that the publish jobs `need`.
+in `release.yml` that the publish jobs `need`. If you remove a publish job
+for a registry you do not use, remove it from `record`'s `needs` too; a job
+of yours that publishes belongs in them.
 
 !!! warning "Name publishing jobs `publish…`"
     `release.py tag` decides whether a failed run published anything by

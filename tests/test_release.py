@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import release  # noqa: E402
@@ -1026,6 +1027,222 @@ class Pinned(unittest.TestCase):
                 if not re.fullmatch(r"[\w.-]+/[\w./-]+@[0-9a-f]{40}", found[1]) or "#" not in line:
                     loose.append(f"{file.relative_to(kit)}:{number}: {found[1]}")
         self.assertEqual(loose, [], "pin to a full commit SHA with a `# vX.Y.Z` comment")
+
+
+class ReleaseRecord(unittest.TestCase):
+    """#18: release-record.json, the run's record for a coordinator."""
+
+    FILES = {
+        "c/Cargo.toml": '[package]\nname = "core"\nversion = "0.1.0"\n',
+        "t/Cargo.toml": '[package]\nname = "tool"\nversion = "0.2.0"\n',
+        "py/pyproject.toml": '[project]\nname = "tool-py"\nversion = "0.2.0"\n',
+        "release-kit.yml": (
+            "packages:\n"
+            "  - {name: core, registry: crates.io, manifest: c/Cargo.toml, version: '0.1.0'}\n"
+            "  - {name: tool, registry: crates.io, manifest: t/Cargo.toml, version: '0.2.0'}\n"
+            "  - name: tool-py\n    registry: pypi\n    manifest: py/pyproject.toml\n    version: '0.2.0'\n"
+            "    artifacts: [{kind: python}]\n"
+            "  - name: tool-bin\n    registry: github\n    manifest: t/Cargo.toml\n    version: '0.2.0'\n"
+            "    tag: 'v{version}'\n    artifacts: [{kind: rust-binary, bin: tool}]\n"
+            "    homebrew: {tap: org/homebrew-tap, formula: tool.rb.tmpl}\n"
+            "release: {name_from: tool}\n"),
+    }
+    SHA = "a" * 40
+    RUN = {"id": 42, "attempt": 1, "url": "https://github.com/org/repo/actions/runs/42"}
+    JOBS = ("gate", "ci", "build", "publish-github", "publish-homebrew", "publish-chocolatey",
+            "publish-crates", "publish-pypi", "publish-npm", "publish-vscode")
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.dist = Path(self.dir.name) / "dist"
+        self.write("release--tool-py--tool-py-python", "tool_py-0.2.0-py3-none-any.whl", b"wheel")
+        self.write("release--tool-py--tool-py-python", "tool_py-0.2.0.tar.gz", b"sdist")
+        self.write("release--tool-bin--tool-bin-rust-binary-x86_64-unknown-linux-gnu",
+                   "tool-v0.2.0-x86_64-unknown-linux-gnu.tar.gz", b"archive", sums=True)
+        self.published = set()
+
+    def tearDown(self):
+        self.dir.cleanup()
+
+    def write(self, artifact, name, data, sums=False):
+        import hashlib
+        folder = self.dist / artifact
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / name).write_bytes(data)
+        if sums:
+            (folder / f"{name}.sha256").write_text(f"{hashlib.sha256(data).hexdigest()}  {name}\n")
+
+    def selection(self, *names):
+        packages = release.load(reader(self.FILES)).packages
+        return json.dumps([{"name": p.name, "registry": p.registry, "version": p.version, "manifest": p.manifest,
+                            "tag": p.tag, "slug": p.slug} for p in packages if p.name in names])
+
+    def needs(self, **results):
+        every = {job: "skipped" if job.startswith("publish") else "success" for job in self.JOBS}
+        every.update({job.replace("_", "-"): result for job, result in results.items()})
+        return json.dumps({job: {"result": result, "outputs": {}} for job, result in every.items()})
+
+    def status(self, package):
+        if package.name == "lost":
+            raise RuntimeError("the registry did not answer")
+        return package.name in self.published
+
+    def record(self, selection, needs, verify_only=False, sha=SHA):
+        document = release.record("release-0.2.0", sha, selection, verify_only, needs, self.dist,
+                                  read=reader(self.FILES), status=self.status, repo="org/repo", run=self.RUN)
+        self.assertEqual(release.schema_errors(document, release.RECORD_SCHEMA), [])
+        try:
+            import jsonschema
+        except ImportError:
+            pass
+        else:
+            schema = json.loads((Path(__file__).resolve().parent.parent / "docs" /
+                                 "release-record.schema.json").read_text())
+            jsonschema.validate(document, schema)
+        return document
+
+    def by_name(self, document):
+        return {p["name"]: p for p in document["packages"]}
+
+    def test_a_complete_run(self):
+        import hashlib
+        self.published.add("core")  # before the run: the gate does not select it
+        document = self.record(self.selection("tool", "tool-py", "tool-bin"),
+                               self.needs(publish_crates="success", publish_pypi="success",
+                                          publish_github="success", publish_homebrew="failure"))
+        self.assertEqual({k: document[k] for k in ("schema_version", "repository", "release", "tag", "commit",
+                                                    "verify_only", "run", "result")},
+                         {"schema_version": 1, "repository": "org/repo", "release": "0.2.0",
+                          "tag": "release-0.2.0", "commit": self.SHA, "verify_only": False, "run": self.RUN,
+                          "result": "complete"})
+        self.assertEqual(document["jobs"]["publish-npm"], "skipped")
+        packages = self.by_name(document)
+        self.assertEqual(list(packages), ["core", "tool", "tool-py", "tool-bin"], "release-kit.yml's order")
+        self.assertEqual(packages["core"], {
+            "name": "core", "registry": "crates.io", "version": "0.1.0", "tag": "core-v0.1.0", "selected": False,
+            "outcome": "already-published", "job": None, "url": "https://crates.io/crates/core/0.1.0", "files": []})
+        self.assertEqual((packages["tool"]["outcome"], packages["tool"]["job"], packages["tool"]["files"]),
+                         ("published", "success", []), "crates publish from source")
+        self.assertEqual([(f["name"], f["sha256"], f["size"]) for f in packages["tool-py"]["files"]],
+                         [("tool_py-0.2.0-py3-none-any.whl", hashlib.sha256(b"wheel").hexdigest(), 5),
+                          ("tool_py-0.2.0.tar.gz", hashlib.sha256(b"sdist").hexdigest(), 5)])
+        self.assertEqual(packages["tool-py"]["url"], "https://pypi.org/project/tool-py/0.2.0/")
+        bin_ = packages["tool-bin"]
+        self.assertEqual((bin_["tag"], bin_["url"], [f["name"] for f in bin_["files"]], bin_["channels"]),
+                         ("v0.2.0", "https://github.com/org/repo/releases/tag/v0.2.0",
+                          ["tool-v0.2.0-x86_64-unknown-linux-gnu.tar.gz"], {"homebrew": "failure"}),
+                         "the .sha256 is checked, not listed; a channel does not change the outcome")
+
+    def test_a_run_that_failed_halfway_says_what_it_published(self):
+        # publish-crates uploaded core, then failed on tool; the build of the
+        # binary failed, so publish-github and publish-pypi never ran.
+        self.published.add("core")
+        document = self.record(self.selection("core", "tool", "tool-py", "tool-bin"),
+                               self.needs(build="failure", publish_crates="failure"))
+        packages = self.by_name(document)
+        self.assertEqual({n: (p["outcome"], p["job"]) for n, p in packages.items()},
+                         {"core": ("published", "failure"), "tool": ("failed", "failure"),
+                          "tool-py": ("skipped", "skipped"), "tool-bin": ("skipped", "skipped")})
+        self.assertEqual((packages["core"]["url"], packages["tool"]["url"]),
+                         ("https://crates.io/crates/core/0.1.0", None))
+        self.assertEqual(document["result"], "partial")
+
+    def test_a_run_that_published_nothing_says_so(self):
+        document = self.record(self.selection("core", "tool"), self.needs(ci="failure"))
+        self.assertEqual([p["outcome"] for p in document["packages"] if p["selected"]], ["skipped", "skipped"])
+        self.assertEqual(document["result"], "nothing-published")
+        failed = self.record(self.selection("core", "tool"), self.needs(publish_crates="failure"))
+        self.assertEqual([p["outcome"] for p in failed["packages"] if p["selected"]], ["failed", "failed"])
+        self.assertEqual(failed["result"], "nothing-published")
+
+    def test_a_published_package_whose_job_failed_is_not_complete(self):
+        self.published.update({"core", "tool"})  # uploaded; consume failed
+        document = self.record(self.selection("core", "tool"), self.needs(publish_crates="failure"))
+        self.assertEqual([p["outcome"] for p in document["packages"] if p["selected"]], ["published", "published"])
+        self.assertEqual(document["result"], "partial")
+
+    def test_a_registry_that_does_not_answer_is_unknown(self):
+        files = dict(self.FILES)
+        files["release-kit.yml"] = files["release-kit.yml"].replace("name: core,", "name: lost,")
+        files["c/Cargo.toml"] = files["c/Cargo.toml"].replace('"core"', '"lost"')
+        self.FILES = files
+        document = self.record(self.selection("lost"), self.needs(publish_crates="cancelled"))
+        self.assertEqual((document["packages"][0]["outcome"], document["result"]), ("unknown", "unknown"))
+
+    def test_a_verify_only_run(self):
+        self.published.update({"tool", "tool-py"})
+        document = self.record(self.selection("tool", "tool-py"),
+                               self.needs(build="skipped", publish_crates="success", publish_pypi="success"),
+                               verify_only=True)
+        packages = self.by_name(document)
+        self.assertTrue(document["verify_only"])
+        self.assertEqual({n: (p["selected"], p["outcome"]) for n, p in packages.items()},
+                         {"core": (False, "skipped"), "tool": (True, "already-published"),
+                          "tool-py": (True, "already-published"), "tool-bin": (False, "skipped")},
+                         "a verify-only run vouches only for what it verified")
+        self.assertEqual(document["result"], "complete")
+        failed = self.record(self.selection("tool"), self.needs(build="skipped", publish_crates="failure"),
+                             verify_only=True)
+        self.assertEqual((failed["packages"][1]["outcome"], failed["result"]),
+                         ("already-published", "nothing-published"))
+
+    def test_a_refused_gate_selects_nothing(self):
+        document = self.record("", self.needs(gate="failure", ci="skipped", build="skipped"), sha="")
+        self.assertEqual({p["outcome"] for p in document["packages"]}, {"skipped"})
+        self.assertEqual((document["release"], document["result"]), ("0.2.0", "nothing-published"))
+
+    def test_a_publish_job_the_record_job_does_not_need_is_an_error(self):
+        needs = json.loads(self.needs())
+        del needs["publish-crates"]
+        with self.assertRaisesRegex(RuntimeError, "does not need publish-crates"):
+            self.record(self.selection("tool"), json.dumps(needs))
+
+    def test_a_file_that_breaks_its_sha256_is_an_error(self):
+        folder = self.dist / "release--tool-bin--tool-bin-rust-binary-x86_64-unknown-linux-gnu"
+        (folder / "tool-v0.2.0-x86_64-unknown-linux-gnu.tar.gz").write_bytes(b"changed")
+        with self.assertRaisesRegex(RuntimeError, "does not match"):
+            self.record(self.selection("tool-bin"), self.needs(publish_github="success"))
+
+    def test_the_schema_is_checked_and_published(self):
+        published = Path(__file__).resolve().parent.parent / "docs" / "release-record.schema.json"
+        self.assertEqual(json.loads(published.read_text()), release.RECORD_SCHEMA,
+                         "regenerate it: release.py record --schema > docs/release-record.schema.json")
+        document = self.record(self.selection("tool"), self.needs(publish_crates="success"))
+        document["packages"][1]["outcome"] = "shipped"
+        document["packages"][0]["files"] = [{"name": "x", "sha256": "abc", "size": -1}]
+        del document["run"]
+        errors = "\n".join(release.schema_errors(document, release.RECORD_SCHEMA))
+        for message in ("record: run is missing", "packages[1].outcome: 'shipped' is not one of",
+                        "files[0].sha256: 'abc' does not match", "files[0].size: -1 is below 0"):
+            self.assertIn(message, errors)
+        self.assertEqual(release.schema_errors(True, {"type": "integer"}), ["record: True is not integer"])
+
+    def test_the_template_records_every_run_without_new_permissions(self):
+        import yaml
+        template = yaml.safe_load((Path(__file__).resolve().parent.parent / "templates" / "release.yml").read_text())
+        job = template["jobs"]["record"]
+        self.assertEqual(job["if"], "always()")
+        self.assertNotIn("permissions", job, "the workflow's contents: read is enough")
+        self.assertEqual(set(job["needs"]), set(template["jobs"]) - {"record"}, "every job, every publish job")
+        self.assertTrue(set(release.PUBLISH_JOBS.values()) | set(release.CHANNEL_JOBS.values())
+                        <= set(job["needs"]))
+        upload = job["steps"][-1]
+        self.assertEqual((upload["with"]["name"], upload["with"]["path"]), ("release-record", "release-record.json"))
+
+    def test_the_command_writes_the_file(self):
+        out = Path(self.dir.name) / "release-record.json"
+        with unittest.mock.patch.object(release, "files_at", lambda sha: reader(self.FILES)), \
+                unittest.mock.patch.object(release, "published_on", self.status), \
+                unittest.mock.patch.dict(os.environ, {"GITHUB_REPOSITORY": "org/repo", "GITHUB_RUN_ID": "7",
+                                                      "GITHUB_RUN_ATTEMPT": "2", "GITHUB_STEP_SUMMARY": ""}):
+            code = release.main(["record", "--tag", "release-0.2.0", "--sha", self.SHA,
+                                 "--selection", self.selection("tool"), "--verify-only", "false",
+                                 "--needs", self.needs(publish_crates="success"), "--dist", str(self.dist),
+                                 "--out", str(out)])
+        self.assertEqual(code, 0)
+        document = json.loads(out.read_text())
+        self.assertEqual((document["result"], document["run"]),
+                         ("complete", {"id": 7, "attempt": 2, "url": "https://github.com/org/repo/actions/runs/7"}))
 
 
 class Install(unittest.TestCase):
