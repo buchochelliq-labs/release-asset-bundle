@@ -66,9 +66,9 @@ The template's `publish-crates` job:
 3. The secret reaches the action only when a new crate is selected.
 4. **`release.py publish-crates`** runs one
    `cargo publish --dry-run --locked` over all the selected crates, then one
-   `cargo publish --locked` per consecutive run of crates that share a
-   credential. Order is kept, so each crate is published after the crates it
-   depends on. If a needed token is missing, it refuses before uploading
+   `cargo publish --locked` per consecutive run of existing crates, and one
+   per new crate. Order is kept, so each crate is published after the crates
+   it depends on. If a needed token is missing, it refuses before uploading
    anything:
 
     ```text
@@ -77,6 +77,16 @@ The template's `publish-crates` job:
 
 Publishing several crates in one `cargo publish` needs Cargo 1.90 or later;
 the job installs stable Rust.
+
+### Many new crates at once
+
+crates.io limits how many new crates an account publishes: a short burst,
+then one every few minutes. A first release of a whole workspace hits it.
+When crates.io answers a new crate with `429 Too Many Requests`,
+`publish-crates` waits until the time the answer names (ten minutes if it
+names none) and tries that crate again, as often as it takes. Any other
+failure stops at once. Eighteen new crates take about two hours, inside a
+job's six-hour limit; crates.io can raise an account's limit on request.
 
 ### Example: a first release
 

@@ -38,6 +38,31 @@ want, run `install`, and open a PR.
 
 ### Unreleased
 
+**GitHub release options.** A `github` package takes `notes` (a command
+whose output is the release's notes, for example a CHANGELOG section;
+otherwise GitHub generates them), `checksums` (one `SHA256SUMS`-style file
+over every asset, uploaded and checked with them) and `attest: true` (build
+provenance attestations for every asset). The template's `publish-github`
+job gains `id-token: write` and `attestations: write`; add them to an
+installed `release.yml` to use `attest`.
+
+**`prepare`.** Every artifact kind takes a `prepare` command, run in the
+build job before anything is built (for `maturin`, before maturin-action):
+generated files the build ships, or tools it needs.
+
+**musl targets.** `x86_64-unknown-linux-musl` and
+`aarch64-unknown-linux-musl` have default runners, and a `rust-binary` musl
+build installs `musl-tools` so C dependencies link statically.
+
+**maturin from a workspace.** A `pyproject.toml` with `dynamic =
+["version"]` takes its version from the crate maturin builds (in PEP 440
+form). When `[tool.maturin] manifest-path` names the crate, maturin runs in
+the `pyproject.toml`'s directory and finds it. Wheels build with `--locked`.
+
+**New crates and crates.io's rate limit.** New crates publish one at a time;
+a `429` for too many new crates waits until the time crates.io names, then
+tries again.
+
 **crates.io first versions.** `preflight --registry crates.io` now says which
 selected crates do not exist yet, as the outputs `new_crates`, `new_crate` and
 `existing_crate`. The new `release.py publish-crates` dry-runs every selected

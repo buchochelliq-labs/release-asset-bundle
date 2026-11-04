@@ -19,21 +19,35 @@ runs:
       with:
         toolchain: stable
         targets: ${{ fromJSON(inputs.job).target }}
+    # A static musl binary links C code (ring, zstd, ...) with musl-gcc.
+    - if: fromJSON(inputs.job).kind == 'rust-binary' && contains(fromJSON(inputs.job).target, 'linux-musl') && runner.os == 'Linux'
+      shell: bash
+      run: sudo apt-get update -qq && sudo apt-get install -y -qq musl-tools
     - if: fromJSON(inputs.job).kind == 'vsix'
       uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
       with:
         node-version: "24"
+    # The artifact's own preparation (generated files, tools), before any build.
+    - if: fromJSON(inputs.job).prepare != ''
+      shell: bash
+      env:
+        JOB: ${{ inputs.job }}
+      run: python3 "$GITHUB_ACTION_PATH/../scripts/release.py" prepare --job "$JOB"
+    # maturin runs in `dir`: with `cargo` empty, it finds the crate from
+    # pyproject.toml's [tool.maturin] manifest-path itself.
     - if: fromJSON(inputs.job).kind == 'maturin'
       uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
       with:
         target: ${{ fromJSON(inputs.job).target }}
-        args: --release --out dist -m ${{ fromJSON(inputs.job).cargo }}
+        args: --release --locked --out dist${{ fromJSON(inputs.job).cargo != '' && format(' -m {0}', fromJSON(inputs.job).cargo) || '' }}
         manylinux: auto
+        working-directory: ${{ fromJSON(inputs.job).dir || '.' }}
     - if: fromJSON(inputs.job).kind == 'maturin-sdist'
       uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
       with:
         command: sdist
-        args: --out dist -m ${{ fromJSON(inputs.job).cargo }}
+        args: --out dist${{ fromJSON(inputs.job).cargo != '' && format(' -m {0}', fromJSON(inputs.job).cargo) || '' }}
+        working-directory: ${{ fromJSON(inputs.job).dir || '.' }}
     - shell: bash
       env:
         JOB: ${{ inputs.job }}

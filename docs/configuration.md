@@ -49,12 +49,19 @@ from the manifests:
 | `tag` | no | The record tag's format. Default `"{name}-v{version}"`. |
 | `paths` | no | Glob patterns (fnmatch, from the repository root) for the files that make up the package. Default: everything under the manifest's directory (`**` if the manifest is at the root). |
 | `artifacts` | for `github`, `pypi`, `vscode` | What to build. See [Artifacts](#artifacts). |
+| `notes` | no, `github` only | A bash command whose output is the release's notes. Default: GitHub generates them. See [GitHub release options](#github-release-options). |
+| `checksums` | no, `github` only | The name of one file, e.g. `SHA256SUMS`, listing the SHA-256 of every asset, uploaded with them. |
+| `attest` | no, `github` only | `true` attests the assets' build provenance. |
 
 ### Manifests
 
 - **`Cargo.toml`**: `[package] name` and `version`. `version.workspace = true`
   reads `[workspace.package] version` from the root `Cargo.toml`.
-- **`pyproject.toml`**: `[project]` (PEP 621), or `[tool.poetry]`.
+- **`pyproject.toml`**: `[project]` (PEP 621), or `[tool.poetry]`. With
+  `dynamic = ["version"]` and a `[tool.maturin]` table, the version is the
+  crate's, as maturin writes it: the `Cargo.toml` that `manifest-path` names
+  (else the one beside `pyproject.toml`), with a SemVer pre-release in PEP
+  440 form (`0.2.0-rc.1` → `0.2.0rc1`).
 - **`package.json`**: `name` and `version`; for `vscode`, the name is
   `<publisher>.<name>`.
 
@@ -148,11 +155,11 @@ the runner it needs.
 
 | `kind` | Builds | Registries | Required | Optional |
 |---|---|---|---|---|
-| `rust-binary` | `<bin>-v<version>-<target>.tar.gz` (`.zip` on Windows), holding the binary and the `include` files | `github` | `bin` | `crate`, `targets`, `include`, `test` |
-| `python` | an sdist and a wheel, with `python -m build` | `pypi`, `github` | | `dir`, `test` |
-| `maturin` | a wheel per target with maturin, plus an sdist | `pypi`, `github` | | `targets`, `sdist`, `test` |
-| `vsix` | `<name>-<version>.vsix`, with `vsce package` | `vscode`, `github` | | `dir`, `test` |
-| `command` | whatever `run` makes, collected by the `outputs` glob | `github`, `pypi`, `vscode` | `run`, `outputs` | `os`, `test` |
+| `rust-binary` | `<bin>-v<version>-<target>.tar.gz` (`.zip` on Windows), holding the binary and the `include` files | `github` | `bin` | `crate`, `targets`, `include`, `test`, `prepare` |
+| `python` | an sdist and a wheel, with `python -m build` | `pypi`, `github` | | `dir`, `test`, `prepare` |
+| `maturin` | a wheel per target with maturin, plus an sdist | `pypi`, `github` | | `targets`, `sdist`, `test`, `prepare` |
+| `vsix` | `<name>-<version>.vsix`, with `vsce package` | `vscode`, `github` | | `dir`, `test`, `prepare` |
+| `command` | whatever `run` makes, collected by the `outputs` glob | `github`, `pypi`, `vscode` | `run`, `outputs` | `os`, `test`, `prepare` |
 
 Any other field is refused (`rust-binary does not take dir`).
 
@@ -194,8 +201,12 @@ an sdist and a pure wheel. One job on `ubuntu-latest`.
 
 Builds from the `Cargo.toml` beside the `pyproject.toml` with
 [`PyO3/maturin-action`](https://github.com/PyO3/maturin-action)
-(`--release`, `manylinux: auto`), one job per target. With `sdist: true` an
-extra job, `<slug>-sdist`, builds the sdist on `ubuntu-latest`.
+(`--release --locked`, `manylinux: auto`), one job per target. When
+`pyproject.toml` names the crate with `[tool.maturin] manifest-path`, maturin
+runs in the `pyproject.toml`'s directory and finds the crate itself (a
+`bindings = "bin"` package at the root of a workspace, for example). With
+`sdist: true` an extra job, `<slug>-sdist`, builds the sdist on
+`ubuntu-latest`.
 
 ### `vsix`
 
@@ -244,6 +255,8 @@ know. The default is the first five below.
 | `aarch64-apple-darwin` | `macos-latest` |
 | `x86_64-apple-darwin` | `macos-latest` (cross-compiled; GitHub retired the Intel runners) |
 | `x86_64-pc-windows-msvc` | `windows-latest` |
+| `x86_64-unknown-linux-musl` | `ubuntu-latest` (not in the default list) |
+| `aarch64-unknown-linux-musl` | `ubuntu-24.04-arm` (not in the default list) |
 | `aarch64-pc-windows-msvc` | `windows-11-arm` (not in the default list) |
 
 ```yaml
@@ -253,6 +266,25 @@ know. The default is the first five below.
 ```
 
 A target with no known runner and none given is refused by `check`.
+
+For a `rust-binary` musl target, the build action installs `musl-tools`, so
+crates with C code (ring, zstd, ...) link statically. A `maturin` musl wheel
+is built in maturin-action's `rust-musl-cross` container; to build the
+aarch64 one cross-compiled on x86_64, give the runner:
+`{target: aarch64-unknown-linux-musl, runner: ubuntu-latest}`.
+
+### `prepare`: before the build
+
+Every kind takes an optional `prepare`: a bash command run in the build job
+before anything is built (for `maturin`, before maturin-action), from the
+repository root, with `VERSION`, `PACKAGE` and `TARGET` set. Use it for
+files the build ships but the repository does not hold, such as generated
+licence notices:
+
+```yaml
+      - kind: maturin
+        prepare: cargo install --locked cargo-about && cargo about generate about.hbs -o THIRD-PARTY-LICENSES.html
+```
 
 ### `test`: check what was built
 
@@ -304,6 +336,36 @@ characters other than letters, digits, `.`, `_` and `-` replaced by `-`
 (`@org/pkg` becomes `org-pkg`). Job ids are listed under
 [`plan`](commands.md#plan). For a `github` package, every file gets a
 `<file>.sha256` beside it, in `sha256sum` format.
+
+## GitHub release options
+
+A `github` package can shape its release:
+
+```yaml
+  - name: onto
+    registry: github
+    manifest: crates/onto-cli/Cargo.toml
+    version: "0.2.0"
+    tag: "v{version}"
+    notes: python3 scripts/changelog-section.py "$VERSION"
+    checksums: SHA256SUMS
+    attest: true
+    artifacts:
+      - kind: rust-binary
+        bin: onto
+```
+
+- **`notes`** runs in the `publish-github` job, from the tagged commit's
+  checkout, with `VERSION`, `PACKAGE` and `TAG` set. What it prints becomes
+  the release's notes. If it fails or prints nothing, nothing is published.
+  Without `notes`, GitHub generates the notes.
+- **`checksums`** writes one file, in `sha256sum` format, over every asset
+  (not the `.sha256` files), and uploads it with them. The publish action
+  checks it against the downloaded assets as it checks each `.sha256`.
+- **`attest: true`** attests every asset's build provenance (including the
+  checksums file) with `actions/attest-build-provenance`, before the upload.
+  The `publish-github` job needs `id-token: write` and `attestations: write`;
+  the template grants both.
 
 ## What `check` refuses
 

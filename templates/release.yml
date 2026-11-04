@@ -90,6 +90,9 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Only used by a package with `attest: true` (its build provenance).
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
