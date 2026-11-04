@@ -634,7 +634,8 @@ class GitHubReleaseOptions(unittest.TestCase):
             calls = []
 
             def runner(command, **kwargs):
-                calls.append((command, kwargs["env"]["VERSION"], kwargs["env"]["TAG"]))
+                self.assertEqual(command[1], "-c", "run by bash itself, not a shell wrapper")
+                calls.append((command[-1], kwargs["env"]["VERSION"], kwargs["env"]["TAG"]))
                 return subprocess.CompletedProcess(command, 0, stdout="## 1.0.0\n\nNotes.\n")
 
             shape = release.github_release(
@@ -754,6 +755,44 @@ class Channels(unittest.TestCase):
         sh("tap", "git", "merge", "-q", "--ff-only", "tool-1.2.0")
         self.assertIsNone(release.update_tap("tap", formula, "org/homebrew-tap", "1.2.0", "u",
                                              open_pr=lambda *a: self.fail("no pull request")))
+
+
+class BashEverywhere(unittest.TestCase):
+    """Commands run as `bash -c`, never through `shell=True` (on Windows that
+    builds `<shell> /c "..."`, which bash cannot read)."""
+
+    def test_commands_are_passed_to_bash_as_arguments(self):
+        from unittest import mock
+        with mock.patch.object(release.subprocess, "run") as ran:
+            release.run('echo "$VERSION"', shell=True, env={"VERSION": "1"})
+        args, kwargs = ran.call_args
+        self.assertEqual(args[0][1:], ["-c", 'echo "$VERSION"'])
+        self.assertTrue(args[0][0].endswith(("bash", "bash.exe")))
+        self.assertNotIn("shell", kwargs)
+
+    def test_a_command_really_runs(self):
+        with tempfile.TemporaryDirectory() as d:
+            release.run(f'echo "$GREETING" > "{d}/out"', shell=True, env={"GREETING": "hi"})
+            self.assertEqual((Path(d) / "out").read_text().strip(), "hi")
+
+
+class DraftReleases(unittest.TestCase):
+    """A GitHub release counts as published only once it is out of draft
+    with its files: an interrupted upload is finished by the next run."""
+
+    package = release.Package("tool", "github", "Cargo.toml", "1.0.0", "v{version}")
+
+    def status(self, answer):
+        from unittest import mock
+        with mock.patch.object(release, "http_status", return_value=answer), \
+                mock.patch.object(release, "repository", return_value="org/tool"):
+            return release.published_on(self.package)
+
+    def test_a_draft_or_an_empty_release_is_not_published(self):
+        self.assertFalse(self.status((404, b"")), "the tags endpoint does not serve drafts")
+        self.assertFalse(self.status((200, json.dumps({"draft": True, "assets": [{}]}).encode())))
+        self.assertFalse(self.status((200, json.dumps({"draft": False, "assets": []}).encode())))
+        self.assertTrue(self.status((200, json.dumps({"draft": False, "assets": [{}]}).encode())))
 
 
 class Timeout(unittest.TestCase):

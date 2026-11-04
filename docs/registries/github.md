@@ -42,13 +42,18 @@ The `publish-github` action, for each selected `github` package in order:
 3. writes its `checksums` file beside them and runs its `notes` command, if
    it has them (`release.py github-release`);
 4. with `attest: true`, attests every file but the `.sha256` ones;
-5. creates the release on the tag, if it does not exist:
-   `gh release create <tag> --verify-tag --title "<name> <version>"` with
-   `--notes-file` (from `notes`) or `--generate-notes`, and `--prerelease`
-   when the version contains `-`;
+5. creates the release on the tag as a **draft**, if it does not exist:
+   `gh release create <tag> --draft --verify-tag --title "<name> <version>"`
+   with `--notes-file` (from `notes`) or `--generate-notes`, and
+   `--prerelease` when the version contains `-`;
 6. uploads the files with `gh release upload --clobber`;
 7. downloads every asset the release now serves into a new directory and
-   checks each `.sha256`, and the `checksums` file, against the files.
+   checks each `.sha256`, and the `checksums` file, against the files;
+8. publishes the release (`gh release edit <tag> --draft=false`).
+
+A run that stops before step 8 leaves a draft. A draft does not count as
+published, so the next run (`release.py tag` again) selects the package,
+uploads into the same draft and publishes it.
 
 Then it runs `verify --registry github --timeout 120`.
 
@@ -64,8 +69,8 @@ Then it runs `verify --registry github --timeout 120`.
 
 ## Verify
 
-A `github` package counts as published when the release on its tag exists
-and has at least one asset. `verify` reads the GitHub API with `GH_TOKEN` or
+A `github` package counts as published when the release on its tag exists,
+is not a draft, and has at least one asset. `verify` reads the GitHub API with `GH_TOKEN` or
 `GITHUB_TOKEN` when set.
 
 ## Consume
