@@ -1607,6 +1607,65 @@ class ChocolateyState(unittest.TestCase):
         self.assertIn("submitted", release.DONE)
         self.assertNotIn("rejected", release.DONE)
 
+    # choco 2.x's output for a version the community repository already has
+    # (its NugetPush.cs), and NuGetGallery's own message as choco 1.x shows it.
+    EXISTS_V2 = ("An error has occurred. This package version already exists on the repository and cannot be "
+                 "modified.\nPackage versions that are approved, rejected, or exempted cannot be modified.\n"
+                 "See https://docs.chocolatey.org/en-us/community-repository/moderation/ for more information")
+    EXISTS_V1 = ("Attempting to push onto-cli.1.2.0.nupkg to https://push.chocolatey.org/\nFailed to process request. "
+                 "'A package with ID 'onto-cli' and version '1.2.0' already exists and cannot be modified.'.\n"
+                 "The remote server returned an error: (409) Conflict..")
+    CONFIG = ("packages:\n  - name: tool\n    registry: github\n    manifest: Cargo.toml\n    version: '1.2.0'\n"
+              "    tag: 'v{version}'\n    artifacts: [{kind: rust-binary, bin: tool}]\n"
+              "    chocolatey: {package: packaging/choco}\n")
+
+    def refused(self, log, state):
+        files = {"Cargo.toml": '[package]\nname = "tool"\nversion = "1.2.0"\n', "release-kit.yml": self.CONFIG}
+        asked = []
+
+        def state_of(package, channel):
+            asked.append((package.name, package.version, channel))
+            if isinstance(state, Exception):
+                raise state
+            return state
+        result = release.chocolatey_refused("tool", log, state_of, read=reader(files))
+        self.assertEqual(asked, [("tool", "1.2.0", "chocolatey")])
+        return result
+
+    def test_a_push_refused_because_the_version_exists_counts_as_pushed(self):
+        self.assertEqual(self.refused(self.EXISTS_V2, "listed"), "listed")
+        self.assertEqual(self.refused(self.EXISTS_V1, "submitted"), "submitted")
+        self.assertEqual(self.refused(self.EXISTS_V2, "due"), "due", "the API does not show it yet")
+        self.assertEqual(self.refused(self.EXISTS_V2, RuntimeError("no answer")), "unknown")
+
+    def test_a_rejected_version_cannot_be_pushed_again(self):
+        with self.assertRaisesRegex(RuntimeError, "rejected this version.*release a new version"):
+            self.refused(self.EXISTS_V2, "rejected")
+
+    def test_any_other_push_failure_still_fails(self):
+        for log in ("An error has occurred. It's possible the package version already exists on the repository "
+                    "or a nuspec element is invalid. See error below...\nResponse status code does not indicate "
+                    "success: 409 (Conflict).",
+                    "Response status code does not indicate success: 403 (Forbidden).", ""):
+            with self.assertRaisesRegex(RuntimeError, "choco push failed"):
+                release.chocolatey_refused("tool", log, lambda p, c: self.fail("not asked"))
+
+    def test_the_action_falls_back_only_after_a_failed_push(self):
+        import yaml
+        steps = yaml.safe_load((Path(__file__).resolve().parent.parent / "publish-chocolatey" / "action.yml")
+                               .read_text())["runs"]["steps"]
+        script = steps[-1]["run"]
+        push = script.index("choco push")
+        self.assertIn("Tee-Object -FilePath $log", script[push:])
+        fallback = script.index("chocolatey-refused --name $name --log $log")
+        self.assertLess(script.index("if ($LASTEXITCODE -ne 0) {", push), fallback)
+        self.assertLess(fallback, script.index("pushed\"", push))
+        log = Path("push.log")
+        log.write_text(self.EXISTS_V2)
+        with unittest.mock.patch.object(release, "chocolatey_refused") as refused:
+            self.assertEqual(release.main(["chocolatey-refused", "--name", "tool", "--log", str(log)]), 0)
+        refused.assert_called_once_with("tool", self.EXISTS_V2)
+
     def test_the_id_is_read_from_the_nuspec_at_a_commit(self):
         sh(".", "git", "add", "-A")
         sh(".", "git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "x")

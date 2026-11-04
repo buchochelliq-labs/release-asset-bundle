@@ -163,8 +163,11 @@ package.
   requests per channel.
 - **Submitted counts as done.** Chocolatey's moderation can take days, so
   `tag` does not wait for it: a version in moderation is reported as
-  `submitted` and counts as done, since pushing it again is refused anyway. A
-  rejected version is due again (`until-accepted`). Likewise an open tap pull
+  `submitted` and counts as done: pushing it again would only replace the
+  version under review. A rejected version is not done, but the community
+  repository refuses to take the same version again (approved, exempted and
+  rejected versions cannot be modified), so finishing it means fixing the
+  package and releasing a new version. Likewise an open tap pull
   request counts as done: merging it is the tap's decision.
 - **A newer release supersedes an older one's channels.** `tag` goes back to
   finish an older release's channels only while `HEAD` names that release (or

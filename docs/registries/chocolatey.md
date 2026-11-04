@@ -60,6 +60,18 @@ package through human moderation, before it is listed. While a version is in
 moderation, Chocolatey refuses newer ones with `403 Forbidden`: run
 `release.py tag` again once the earlier one is approved.
 
+When the community repository already has the version and will not replace
+it, `choco push` fails with "already exists and cannot be modified" (choco
+2.x: "This package version already exists on the repository and cannot be
+modified. Package versions that are approved, rejected, or exempted cannot be
+modified."). That happens when a run is repeated after a push whose answer
+was lost, or the version was approved after the gate read its state. The
+action then runs `release.py chocolatey-refused`, which counts the push as
+done unless the community API reports the version `rejected` (a rejected
+version needs a new version). It matches only that phrase: any other failure,
+including choco's generic "It's possible the package version already exists
+… or a nuspec element is invalid" for every 406 or 409, still fails the job.
+
 ## Finishing it later
 
 Chocolatey is `until-accepted`: a version can be pushed again until the

@@ -85,7 +85,9 @@ also waits briefly for a release's channels and names any not done.
 [gate, ci, build, publish-github]` and let them run when `publish-github` was
 skipped because nothing was due on GitHub (copy the two `if:` conditions from
 `templates/release.yml`); without that, a run that only finishes a channel
-publishes nothing. See [the retry policy](recovery.md#what-each-channel-allows-again-the-retry-policy).
+publishes nothing. A `choco push` refused because the community repository
+already has the version ("already exists and cannot be modified") counts as
+pushed, unless the version was rejected. See [the retry policy](recovery.md#what-each-channel-allows-again-the-retry-policy).
 
 **Catch a crate crates.io would refuse at `check`.** For every crates.io
 package, `release.py check` reads the manifests with `cargo metadata` and

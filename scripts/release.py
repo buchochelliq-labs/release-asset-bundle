@@ -59,6 +59,10 @@ Commands (the gate action, in CI):
     render --name NAME --channel homebrew|chocolatey --sums FILE --out DIR
                 render a github package's Homebrew formula or Chocolatey
                 package from its templates and its release's checksums.
+    chocolatey-refused --name NAME --log FILE
+                after a failed `choco push`: succeed when the community
+                repository refused it only because it already has the version
+                (and has not rejected it), else fail.
     homebrew-tap --tap DIR --formula FILE --repo OWNER/TAP --version V --release-url URL
                 put the formula on a branch of the tap and open a pull request.
     record --tag TAG --sha SHA --selection JSON --verify-only B --needs JSON
@@ -893,7 +897,8 @@ def update_tap(tap, formula, repo, version, release_url, open_pr=open_tap_pr):
 #                   a published one is never touched again.
 #   idempotent      publishing again is harmless: done again until done.
 #   until-accepted  can be pushed again until the channel has accepted it
-#                   (accepted includes "in moderation": pushing then is refused).
+#                   (accepted includes "in moderation": pushing again would
+#                   only replace the version under review).
 # The registries say themselves whether a version is published (`published_on`);
 # the channels made from a GitHub release have their own state, read live
 # (`channel_state`), so `tag` and the gate can select a published package
@@ -993,6 +998,42 @@ def channel_state(package, channel, commit=None, fetch=http_status):
     if channel == "chocolatey":
         return chocolatey_state(package, settings, fetch, commit)
     raise ValueError(f"{channel} is not a channel made from a release")
+
+
+# What the community repository answers a push of a version it already has
+# and will not replace (approved, exempted or rejected; a version still in its
+# checks or moderation is replaced by a new push): NuGetGallery's "A package
+# with ID '<id>' and version '<version>' already exists and cannot be
+# modified.", which choco 2.x rewrites as "This package version already exists
+# on the repository and cannot be modified." (choco's NugetPush.cs). Only this
+# phrase: choco's generic "It's possible the package version already exists"
+# (any 406 or 409, an invalid nuspec too) is not matched.
+CHOCOLATEY_EXISTS = re.compile(r"already exists (?:on the repository )?and cannot be modified", re.I)
+
+
+def chocolatey_refused(name, log, state_of=None, read=None):
+    """After `choco push` failed for package `name` (log: its output): the
+    channel's state when the push was refused only because the community
+    repository already has the version, which counts as pushed (a re-run
+    after a push whose answer was lost, or a version listed since the
+    gate looked). Raises otherwise, and when the version was rejected: a
+    rejected version cannot be pushed again, so it needs a new version."""
+    if not CHOCOLATEY_EXISTS.search(log):
+        raise RuntimeError(f"{name}: choco push failed (its output is above)")
+    package = next((p for p in load(read or files_on_disk()).packages if p.name == name), None)
+    if package is None:
+        raise RuntimeError(f"{name} is not a package of {CONFIG}")
+    try:
+        state = (state_of or channel_state)(package, "chocolatey")
+    except (RuntimeError, OSError, ValueError) as error:
+        print(f"{package}: cannot read its Chocolatey state ({error})", flush=True)
+        state = "unknown"
+    if state == "rejected":
+        raise RuntimeError(f"{package}: Chocolatey rejected this version, and a rejected version cannot be pushed "
+                           "again; fix the package and release a new version")
+    print(f"{package}: the community repository already has this version ({state}); counted as pushed",
+          flush=True)
+    return state
 
 
 def pending_channels(package, state_of):
@@ -2790,6 +2831,9 @@ def main(argv=None):
     renderer.add_argument("--channel", required=True, choices=sorted(CHANNEL_KEYS))
     renderer.add_argument("--sums", required=True, help="the release's checksums, in sha256sum format")
     renderer.add_argument("--out", required=True)
+    refused = commands.add_parser("chocolatey-refused")
+    refused.add_argument("--name", required=True)
+    refused.add_argument("--log", required=True, help="the output of the failed `choco push`")
     tapper = commands.add_parser("homebrew-tap")
     tapper.add_argument("--tap", required=True, help="a checkout of the tap")
     tapper.add_argument("--formula", required=True)
@@ -2861,6 +2905,8 @@ def main(argv=None):
             for path in render_channel(args.name, args.channel, Path(args.sums).read_text(encoding="utf-8"),
                                        args.out):
                 print(path)
+        elif args.command == "chocolatey-refused":
+            chocolatey_refused(args.name, Path(args.log).read_text(encoding="utf-8", errors="replace"))
         elif args.command == "homebrew-tap":
             update_tap(args.tap, args.formula, args.repo, args.version, args.release_url)
         elif args.command == "build":

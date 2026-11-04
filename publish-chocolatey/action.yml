@@ -77,7 +77,16 @@ runs:
           # Each version goes through Chocolatey's checks (and a new package through
           # moderation) before it is listed; the push only submits it.
           $package = (Get-ChildItem (Join-Path $dir out) -Filter *.nupkg).FullName
-          choco push $package --source https://push.chocolatey.org/ --api-key $env:CHOCOLATEY_API_KEY
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $log = Join-Path $dir push.log
+          choco push $package --source https://push.chocolatey.org/ --api-key $env:CHOCOLATEY_API_KEY 2>&1 |
+            Tee-Object -FilePath $log
+          if ($LASTEXITCODE -ne 0) {
+            # Refused because the repository already has this version (approved
+            # since the gate looked, or pushed by a run whose answer was lost):
+            # done, unless it was rejected. Anything else fails as before.
+            python (Join-Path $env:GITHUB_ACTION_PATH ../scripts/release.py) chocolatey-refused --name $name --log $log
+            if ($LASTEXITCODE -ne 0) { exit 1 }
+            continue
+          }
           Write-Output "$id ${version}: pushed"
         }
