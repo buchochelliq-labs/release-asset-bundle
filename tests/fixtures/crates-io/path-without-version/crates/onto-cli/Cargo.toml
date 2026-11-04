@@ -1,0 +1,10 @@
+[package]
+name = "onto-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "onto-cli"
+
+[dependencies]
+onto-core = { path = "../onto-core" }

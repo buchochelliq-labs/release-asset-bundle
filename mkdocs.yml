@@ -57,6 +57,7 @@ nav:
       - registries/index.md
       - GitHub Releases: registries/github.md
       - crates.io: registries/crates-io.md
+      - Publishing to crates.io: registries/publishing-to-crates-io.md
       - PyPI: registries/pypi.md
       - npm: registries/npm.md
       - VS Code Marketplace and Open VSX: registries/vscode.md

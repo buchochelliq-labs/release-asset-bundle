@@ -24,7 +24,9 @@ release_cohort.py; the rules are the same:
 Commands (person):
     check       release-kit.yml matches every manifest, names no package twice,
                 lists each package after the listed packages it depends on,
-                and declares artifacts each registry can publish.
+                and declares artifacts each registry can publish; and no
+                crates.io package has what `cargo publish` would refuse.
+                --offline, --publish-dry-run.
     sync        rewrite release-kit.yml's versions from the manifests.
     status      each package: version, tag, and whether it is published.
     tag         tag the release and wait for it: an annotated record tag per
@@ -37,7 +39,8 @@ Commands (the gate action, in CI):
                 Writes sha, release, selection and per-registry flags to
                 GITHUB_OUTPUT.
     preflight --registry R --selection JSON
-                refuse, before uploading, any selected package of R already on R.
+                refuse, before uploading, any selected package of R already on R
+                (and, for crates.io, any crate `check` finds not ready).
     verify --registry R --selection JSON
                 wait until every selected package of R is on R.
     plan --selection JSON
@@ -1472,16 +1475,25 @@ def crate_exists(name):
     return http_status(f"https://crates.io/api/v1/crates/{quote(name)}")[0] == 200
 
 
-def preflight(registry, selection, status=published_on, exists=crate_exists, output=None, ovsx_token=False):
+def preflight(registry, selection, status=published_on, exists=crate_exists, output=None, ovsx_token=False,
+              ready=None):
     """Refuse, just before uploading, any selected version already published:
     another run may have published it since the gate. For crates.io, also
     say which selected crates are new (their first version needs a token,
     since Trusted Publishing needs the crate to exist): writes `new_crates`
-    (JSON), `new_crate` and `existing_crate` to GITHUB_OUTPUT. For vscode,
-    writes `uploads`: which of the two registries each extension still lacks."""
+    (JSON), `new_crate` and `existing_crate` to GITHUB_OUTPUT, after `ready`
+    (crates_io_readiness, for the selected names) finds nothing that would
+    stop `cargo publish`. For vscode, writes `uploads`: which of the two
+    registries each extension still lacks."""
     chosen = selected(registry, selection)
     if out := [str(p) for p in chosen if status(p)]:
         raise RuntimeError(f"already on {registry}: {', '.join(out)}; a published version is permanent")
+    if registry == "crates.io" and ready and chosen:
+        errors, warnings = ready({p.name for p in chosen})
+        for warning in warnings:
+            print(f"warning: {warning}", flush=True)
+        if errors:
+            raise RuntimeError("not ready for crates.io:\n  " + "\n  ".join(errors))
     print(f"to publish on {registry}: " + (", ".join(str(p) for p in chosen) or "nothing"), flush=True)
     if registry == "vscode":
         uploads = vscode_uploads(chosen, ovsx_token)
@@ -1975,6 +1987,431 @@ def record_lines(document):
 
 
 # ---------------------------------------------------------------------------
+# crates.io readiness: what would stop `cargo publish` after the tag, found
+# by `check` (and again by `preflight --registry crates.io`) before it.
+# Manifests are read with `cargo metadata`, so workspace inheritance and
+# renamed dependencies mean what cargo says they mean.
+
+OFFLINE = "RELEASE_KIT_OFFLINE"
+LIBRARY_KINDS = {"lib", "rlib", "dylib", "proc-macro"}
+# include_str!("..."), include_bytes!("...") and include!("..."), relative to
+# the file, or concat!(env!("CARGO_MANIFEST_DIR"), "/..."), relative to the crate.
+EMBED = re.compile(r'\binclude(?:_str|_bytes)?!\s*\(\s*(concat!\s*\(\s*env!\s*\(\s*"CARGO_MANIFEST_DIR"\s*\)\s*,\s*)?'
+                   r'"([^"]+)"')
+# Packaged files that `cargo publish` does not build: their embeds cannot fail it.
+NOT_BUILT = ("tests/", "benches/", "examples/")
+# Nor does it build test code: an item under #[cfg(test)] or #[test].
+TEST_ITEM = re.compile(r"#\[\s*(?:test\s*\]|cfg\s*\(\s*(?:all\s*\(\s*)?test\b)")
+
+
+def offline():
+    """Whether checks that ask crates.io are skipped (RELEASE_KIT_OFFLINE=1)."""
+    return os.environ.get(OFFLINE, "").strip().lower() in {"1", "true", "yes"}
+
+
+_last_api_call = [0.0]
+
+
+def polite_fetch(url):
+    """http_status, at most one crates.io API request a second (its data
+    access policy); the sparse index is a CDN and needs no spacing."""
+    if url.startswith("https://crates.io/api/"):
+        time.sleep(max(0.0, _last_api_call[0] + 1 - time.monotonic()))
+        _last_api_call[0] = time.monotonic()
+    return http_status(url)
+
+
+def cargo_run(args, cwd):
+    return subprocess.run(["cargo", *args], cwd=cwd, text=True, encoding="utf-8", capture_output=True)
+
+
+def cargo_failure(result):
+    lines = [line for line in (result.stderr or "").splitlines() if line.strip()]
+    errors = [line for line in lines if line.startswith("error")]
+    return (errors[0] if errors else lines[-1] if lines else f"exit {result.returncode}").strip()
+
+
+def index_url(name):
+    """The crate's file in crates.io's sparse index: every version, one JSON
+    object per line."""
+    name = name.lower()
+    prefix = {1: "1", 2: "2", 3: f"3/{name[:1]}"}.get(len(name), f"{name[:2]}/{name[2:4]}")
+    return f"https://index.crates.io/{prefix}/{quote(name)}"
+
+
+def crate_versions(name, fetch):
+    """The versions of `name` on crates.io that are not yanked, or None if
+    there is no such crate."""
+    status, body = fetch(index_url(name))
+    if status == 404:
+        return None
+    entries = [json.loads(line) for line in body.decode("utf-8").splitlines() if line.strip()]
+    return [e["vers"] for e in entries if not e.get("yanked") and e.get("name", name).lower() == name.lower()]
+
+
+def _semver(text):
+    """(major, minor, patch, pre) from a version, or a partial one (missing
+    parts are None); pre is a tuple of identifiers."""
+    match = re.fullmatch(r"(\d+|[*xX])(?:\.(\d+|[*xX]))?(?:\.(\d+|[*xX]))?(?:-([0-9A-Za-z.-]+))?(?:\+[0-9A-Za-z.-]+)?",
+                         text.strip())
+    if not match:
+        raise ValueError(f"not a version: {text!r}")
+    parts = [None if p is None or p in "*xX" else int(p) for p in match.groups()[:3]]
+    pre = tuple(match[4].split(".")) if match[4] else ()
+    return (*parts, pre)
+
+
+def _order(major, minor, patch, pre):
+    """A sort key in SemVer precedence: a pre-release sorts before its release."""
+    ids = tuple((0, int(i), "") if i.isdigit() else (1, 0, i) for i in pre)
+    return (major, minor, patch, (0, ids) if pre else (1, ()))
+
+
+def _comparator(text):
+    """One comparator of a Cargo version requirement: its bounds (low,
+    low_inclusive, high, high_inclusive) over `_order` keys (None for
+    unbounded), and the (major, minor, patch) of the pre-release it names."""
+    match = re.fullmatch(r"\s*(\^|~|=|>=|<=|>|<)?\s*(.+?)\s*", text)
+    op, (major, minor, patch, pre) = match[1] or "^", _semver(match[2])
+    if re.search(r"[*xX]", match[2]):
+        op = "="   # 1.*, 1.2.x: like =1, =1.2
+    if major is None:
+        return (None, True, None, False), None
+    low = _order(major, minor or 0, patch or 0, pre)
+    named = (major, minor, patch) if pre else None
+
+    def up(*version):
+        return _order(*version, ())
+
+    # The first version past a partial one (1 -> 2.0.0, 1.2 -> 1.3.0).
+    past = up(major + 1, 0, 0) if minor is None else up(major, minor + 1, 0) if patch is None else None
+    if op == "^":
+        if past is None:
+            past = up(major + 1, 0, 0) if major else up(0, minor + 1, 0) if minor else up(0, 0, patch + 1)
+        elif minor is not None and major:
+            past = up(major + 1, 0, 0)
+        return (low, True, past, False), named
+    if op == "~":
+        return (low, True, past or up(major, minor + 1, 0), False), named
+    if op == "=":
+        return ((low, True, past, False) if past else (low, True, low, True)), named
+    if op == ">=":
+        return (low, True, None, False), named
+    if op == ">":
+        return ((past, True, None, False) if past else (low, False, None, False)), named
+    if op == "<":
+        return (None, True, low, False), named
+    return ((None, True, past, False) if past else (None, True, low, True)), named   # <=
+
+
+def requirement_matches(requirement, version):
+    """Whether `version` satisfies a Cargo version requirement (`^1.2`,
+    `~0.3.1`, `>=1, <2`, `=1.0.0`, `1.*`, ...). A pre-release matches only a
+    requirement that names a pre-release of the same major.minor.patch, as
+    in Cargo."""
+    major, minor, patch, pre = _semver(version)
+    key = _order(major, minor, patch, pre)
+    allowed = not pre
+    for text in requirement.split(","):
+        (low, low_inclusive, high, high_inclusive), named = _comparator(text)
+        allowed = allowed or named == (major, minor, patch)
+        if low is not None and (key < low or (key == low and not low_inclusive)):
+            return False
+        if high is not None and (key > high or (key == high and not high_inclusive)):
+            return False
+    return allowed
+
+
+def repository_of(url):
+    """(host, owner, name) of a repository URL, lower-cased, or None."""
+    match = re.match(r"^(?:[a-z+]+://)?(?:[^@/]+@)?([^/:]+)[/:]([^/]+)/([^/#?]+?)(?:\.git)?/?(?:[#?].*)?$",
+                     (url or "").strip(), re.I)
+    return tuple(part.lower() for part in match.groups()) if match else None
+
+
+def owner_problem(name, repo, fetch):
+    """Whether this repository can publish `name` on crates.io, judged from
+    the public API: (None, None) when the name is free or ours, ("error",
+    message) when it belongs to someone else, ("warning", message) when it
+    cannot be told. The repository's owner (a GitHub user or organisation)
+    is ours when crates.io lists that user, or a team of that organisation
+    (github:<org>:<team>), among the crate's owners, or when the crate's
+    `repository` is on GitHub under that owner (a crate an organisation
+    member owns personally)."""
+    status, body = fetch(f"https://crates.io/api/v1/crates/{quote(name)}")
+    if status == 404:
+        return None, None
+    crate = json.loads(body).get("crate", {})
+    if crate.get("name", name) != name:
+        return "error", (f"{name}: crates.io has the crate {crate['name']}, and names that differ only in case, "
+                         f"`-` or `_` are the same name; rename the package (e.g. {name}-cli, keeping the command "
+                         f"with [[bin]] name = \"{name}\")")
+    owner = repo.split("/")[0].lower() if repo else None
+    declared = repository_of(crate.get("repository"))
+    if owner and declared and declared[0] == "github.com" and declared[1] == owner:
+        return None, None
+    _, body = fetch(f"https://crates.io/api/v1/crates/{quote(name)}/owners")
+    users = json.loads(body or b"{}").get("users", [])
+    logins = ", ".join(u.get("login", "?") for u in users) or "nobody listed"
+    if owner and any(u.get("login", "").lower() == owner or u.get("login", "").lower().startswith(f"github:{owner}:")
+                     for u in users):
+        return None, None
+    if owner and declared and declared[0] == "github.com":
+        return "error", (f"{name}: the name is taken on crates.io (owners: {logins}; repository "
+                         f"{crate.get('repository')}), and {repo} cannot publish it. Rename the package "
+                         f"(e.g. {name}-cli, keeping the command with [[bin]] name = \"{name}\"), or, if the crate "
+                         f"is yours, have an owner add {owner} (cargo owner --add {owner}, or "
+                         f"github:{owner}:<team> for an organisation)")
+    return "warning", (f"{name}: crates.io's {name} is owned by {logins}"
+                       + (f" (repository {crate['repository']})" if crate.get("repository") else "")
+                       + f"; release-kit cannot tell whether {repo or 'this repository'} may publish it. Make sure "
+                       "its Trusted Publisher names this repository, or that the token's account is an owner")
+
+
+def without_tests(source):
+    """Rust source without its test items (#[cfg(test)] or #[test], up to
+    the end of the braced block that follows), which `cargo publish` does
+    not compile. Braces are counted, not parsed: good enough for embeds."""
+    kept, at = [], 0
+    while match := TEST_ITEM.search(source, at):
+        kept.append(source[at:match.start()])
+        brace, semicolon = source.find("{", match.end()), source.find(";", match.end())
+        if brace < 0 or 0 <= semicolon < brace:
+            at = match.end()
+            continue
+        depth, at = 0, brace
+        while at < len(source):
+            depth += {"{": 1, "}": -1}.get(source[at], 0)
+            at += 1
+            if depth == 0:
+                break
+    return "".join(kept) + source[at:]
+
+
+def embed_problems(name, crate_dir, packaged):
+    """Files the crate's sources embed (include_str!, include_bytes!,
+    include!) that its package does not carry: a package holds only its
+    crate directory, so an embed from elsewhere fails `cargo publish`."""
+    problems, carried = [], set(packaged)
+    for file in sorted(packaged):
+        if not file.endswith(".rs") or file.startswith(NOT_BUILT):
+            continue
+        try:
+            text = (crate_dir / file).read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for line in without_tests(text).splitlines():
+            if line.lstrip().startswith("//"):
+                continue
+            for manifest_relative, literal in EMBED.findall(line):
+                start = "" if manifest_relative else posixpath.dirname(file)
+                resolved = posixpath.normpath(posixpath.join(start, literal.lstrip("/") if manifest_relative
+                                                             else literal))
+                if resolved == ".." or resolved.startswith("../"):
+                    problems.append(f"{name}: {file} embeds {literal}, outside the crate; a package carries only "
+                                    "its crate directory. Copy the file into the crate (and add a test that the "
+                                    "copy matches the original)")
+                elif resolved not in carried:
+                    problems.append(f"{name}: {file} embeds {literal}, which the package does not carry; add it "
+                                    "to `include` in Cargo.toml (or take it out of `exclude`)")
+    return problems
+
+
+def _workspaces(release, base, cargo, offline_mode):
+    """{manifest path (resolved): (metadata package, workspace metadata)}
+    for every Cargo.toml release-kit.yml names, plus the root workspace's
+    members; and the error each unreadable manifest gave."""
+    found, errors, seen = {}, {}, set()
+    manifests = [p.manifest for p in release.packages if PurePosixPath(p.manifest).name == "Cargo.toml"]
+    if (base / "Cargo.toml").is_file():
+        manifests.append("Cargo.toml")
+    for manifest in manifests:
+        path = (base / manifest).resolve()
+        if path in found or path in errors:
+            continue
+        args = ["metadata", "--format-version", "1", "--no-deps", "--manifest-path", str(path)]
+        result = cargo(args + (["--offline"] if offline_mode else []), base)
+        if result.returncode:
+            errors[path] = cargo_failure(result)
+            continue
+        metadata = json.loads(result.stdout)
+        if metadata["workspace_root"] in seen:
+            continue
+        seen.add(metadata["workspace_root"])
+        for package in metadata["packages"]:
+            found[Path(package["manifest_path"]).resolve()] = (package, metadata)
+    return found, errors
+
+
+def declared_crates(release, base, found):
+    """The crates release-kit.yml publishes in some form: crates.io packages,
+    any package whose manifest is a crate's, the crates maturin builds and
+    the crates a rust-binary names."""
+    names = {p.name for p in release.packages if p.registry == "crates.io"}
+    for package in release.packages:
+        manifests = [package.manifest]
+        if PurePosixPath(package.manifest).name == "pyproject.toml":
+            try:
+                manifests.append(maturin_manifest(files_on_disk(base), package.manifest)[0])
+            except (OSError, ValueError, tomllib.TOMLDecodeError):
+                pass
+        for manifest in manifests:
+            if hit := found.get((base / manifest).resolve()):
+                names.add(hit[0]["name"])
+        names.update(a["crate"] for a in package.artifacts if a.get("kind") == "rust-binary" and a.get("crate"))
+    return names
+
+
+def crates_io_readiness(release, base, only=None, fetch=None, cargo=None, repo=None, offline_mode=None):
+    """What would stop `cargo publish` for release-kit.yml's crates.io
+    packages (or the ones named in `only`), as (errors, warnings):
+
+    - the manifest says `publish = false`, or lists only other registries;
+    - a dependency (normal or build) by `git` or `path` has no `version`, or
+      comes from another registry;
+    - a dependency that publishing turns into a crates.io one (a `git` or
+      `path` dependency with a `version`) is not on crates.io at a matching
+      version, and is not a crates.io package listed before this one;
+    - the name is on crates.io and belongs to someone else (a warning when
+      that cannot be told);
+    - `cargo package --list` fails, or a source file embeds a file the
+      package does not carry.
+
+    With every package (no `only`), it also warns about the workspace's
+    library crates release-kit.yml does not publish. Checks that ask
+    crates.io are skipped offline (RELEASE_KIT_OFFLINE=1)."""
+    offline_mode = offline() if offline_mode is None else offline_mode
+    fetch = fetch or polite_fetch
+    if cargo is None:
+        if not shutil.which("cargo"):
+            return [], ["cargo is not installed: the crates.io checks (manifests, dependencies, packaging) "
+                        "were skipped"]
+        cargo = cargo_run
+    if repo is None:
+        try:
+            repo = repository()
+        except (RuntimeError, subprocess.CalledProcessError):
+            repo = ""
+    errors, warnings = [], []
+    if not repo and not offline_mode:
+        warnings.append("cannot tell this repository's GitHub owner (no GITHUB_REPOSITORY, and origin is not on "
+                        "GitHub): who owns each crate on crates.io was not checked")
+    found, unreadable = _workspaces(release, base, cargo, offline_mode)
+    crates = [p for p in release.packages if p.registry == "crates.io"]
+    position = {p.name: i for i, p in enumerate(crates)}
+    for package in crates:
+        if only is not None and package.name not in only:
+            continue
+        path = (base / package.manifest).resolve()
+        if path in unreadable:
+            errors.append(f"{package.name}: cargo metadata cannot read {package.manifest}: {unreadable[path]}")
+            continue
+        if path not in found:
+            continue   # `check` already says the manifest is missing
+        meta, _ = found[path]
+        problems = []
+        publish = meta.get("publish")
+        if publish == []:
+            problems.append(f"{package.name}: {package.manifest} says `publish = false`, so cargo will not publish "
+                            f"it; remove that line (or take the package out of {CONFIG} to keep the crate private)")
+        elif publish is not None and "crates-io" not in publish:
+            problems.append(f"{package.name}: {package.manifest} publishes only to {', '.join(publish)} "
+                            f"(`publish = [...]`); add \"crates-io\" to the list, or remove `publish`")
+        crate_dir = path.parent
+        checked = set()
+        for dep in meta["dependencies"]:
+            if dep.get("kind") == "dev" or dep["name"] in checked:
+                continue
+            checked.add(dep["name"])
+            source, local, requirement = dep.get("source") or "", dep.get("path"), dep.get("req") or "*"
+            what = f"{dep['name']} (renamed {dep['rename']})" if dep.get("rename") else dep["name"]
+            if dep.get("registry"):
+                problems.append(f"{package.name}: depends on {what} from the registry {dep['registry']}; crates.io "
+                                "accepts only dependencies on crates.io")
+                continue
+            if source.startswith("git+"):
+                if requirement == "*":
+                    problems.append(f"{package.name}: depends on {what} from git ({source[4:]}) with no version, "
+                                    f"and crates.io refuses git dependencies. Publish {dep['name']} to crates.io "
+                                    "first, then give the dependency a `version` (cargo builds from git locally "
+                                    "and from crates.io once published)")
+                    continue
+            elif local:
+                if requirement == "*":
+                    target = found.get((Path(local) / "Cargo.toml").resolve())
+                    version = target[0]["version"] if target else "X.Y.Z"
+                    relative = Path(os.path.relpath(local, crate_dir)).as_posix()
+                    problems.append(f"{package.name}: depends on {what} by path with no version; crates.io needs "
+                                    f"one: {dep.get('rename') or dep['name']} = {{ path = \"{relative}\", "
+                                    f"version = \"{version}\" }}")
+                    continue
+            else:
+                continue   # a crates.io dependency, resolved by the lockfile
+            # Published, a git or path dependency becomes a crates.io one.
+            if dep["name"] in position:
+                continue   # a package of this release: `check` orders it before this one
+            if offline_mode:
+                continue
+            versions = crate_versions(dep["name"], fetch)
+            fix = (f"publish {dep['name']} first (from its own repository), or list it in {CONFIG} "
+                   f"(registry: crates.io) before {package.name}")
+            if versions is None:
+                problems.append(f"{package.name}: depends on {what} {requirement}, which is not on crates.io; {fix}")
+            elif not any(requirement_matches(requirement, v) for v in versions):
+                newest = max(versions, key=lambda v: _order(*_semver(v))) if versions else "none"
+                problems.append(f"{package.name}: depends on {what} {requirement}, but crates.io has no matching "
+                                f"version (newest: {newest}); {fix}")
+        if not offline_mode and repo:
+            kind, message = owner_problem(package.name, repo, fetch)
+            (problems if kind == "error" else warnings).extend([message] if message else [])
+        args = ["package", "--list", "--allow-dirty", "--manifest-path", str(path)]
+        result = cargo(args + (["--offline"] if offline_mode else []), base)
+        if result.returncode:
+            if not problems:   # else most likely one of them
+                problems.append(f"{package.name}: `cargo package --list` fails: {cargo_failure(result)}")
+        else:
+            problems.extend(embed_problems(package.name, crate_dir, result.stdout.split()))
+        errors.extend(problems)
+    if only is None:
+        declared = declared_crates(release, base, found)
+        members = {}
+        for meta, workspace in found.values():
+            if meta["id"] in workspace.get("workspace_members", ()) and meta["name"] not in declared and any(
+                    LIBRARY_KINDS & set(t["kind"]) for t in meta["targets"]):
+                members[meta["name"]] = " (publish = false)" if meta.get("publish") == [] else ""
+        if members:
+            warnings.append(f"library crates {CONFIG} does not publish: "
+                            + ", ".join(f"{n}{note}" for n, note in sorted(members.items()))
+                            + ". To publish one, list it with registry: crates.io; a crate meant to stay "
+                            "private needs nothing")
+    return errors, warnings
+
+
+def publish_dry_run(release, base, runner=None):
+    """`cargo publish --dry-run --locked` over every crates.io package, as
+    the release will run it (one cargo call per workspace, so each crate is
+    verified against the others' packages). Builds every crate: slow, and
+    meant for CI. Returns an error message, or None."""
+    runner = runner or cargo_run
+    groups = {}
+    for package in release.packages:
+        if package.registry == "crates.io":
+            manifest = str((base / package.manifest).resolve())
+            located = runner(["locate-project", "--workspace", "--message-format", "plain",
+                              "--manifest-path", manifest], base)
+            workspace = Path(located.stdout.strip() if not located.returncode else manifest).parent
+            groups.setdefault(workspace, []).append(package.name)
+    for directory, names in groups.items():
+        args = ["publish", "--dry-run", "--locked", "--allow-dirty", *[a for n in names for a in ("-p", n)]]
+        print(f"$ cargo {' '.join(args)}", flush=True)
+        result = runner(args, directory)
+        if result.returncode:
+            print(result.stderr or "", end="", file=sys.stderr)
+            return f"`cargo publish --dry-run` fails for {', '.join(names)}: {cargo_failure(result)}"
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Installing: repositories use a copy of the kit, pinned and reviewable: a
 # repository's release changes only when it installs a newer kit.
 
@@ -2320,7 +2757,11 @@ def status_lines(read=None, status=published_on, remote="origin", channel_status
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     commands = parser.add_subparsers(dest="command", required=True)
-    commands.add_parser("check")
+    checker = commands.add_parser("check")
+    checker.add_argument("--offline", action="store_true",
+                         help=f"skip the checks that ask crates.io (also {OFFLINE}=1)")
+    checker.add_argument("--publish-dry-run", action="store_true",
+                         help="also run `cargo publish --dry-run` over the crates.io packages (builds them; for CI)")
     commands.add_parser("sync")
     commands.add_parser("status")
     tagger = commands.add_parser("tag")
@@ -2390,7 +2831,17 @@ def main(argv=None):
             if errors := check(files_on_disk()):
                 print("\n".join(errors), file=sys.stderr)
                 return 1
-            print(f"{CONFIG} matches the repository (release {load(files_on_disk()).name}).")
+            release = load(files_on_disk())
+            if any(p.registry == "crates.io" for p in release.packages) or (root() / "Cargo.toml").is_file():
+                errors, warnings = crates_io_readiness(release, root(), offline_mode=args.offline or offline())
+                for warning in warnings:
+                    print(f"warning: {warning}", file=sys.stderr)
+                if not errors and args.publish_dry_run:
+                    errors = [e for e in [publish_dry_run(release, root())] if e]
+                if errors:
+                    print("\n".join(errors), file=sys.stderr)
+                    return 1
+            print(f"{CONFIG} matches the repository (release {release.name}).")
         elif args.command == "sync":
             print("\n".join(sync()) or "Nothing to change.")
         elif args.command == "status":
@@ -2424,7 +2875,8 @@ def main(argv=None):
             print(f"release-kit {manifest['version']}: the installed copy is unmodified.")
         elif args.command == "preflight":
             # Only whether an Open VSX token is set; the token stays in the environment.
-            preflight(args.registry, args.selection, ovsx_token=bool(os.environ.get("OVSX_PAT")))
+            preflight(args.registry, args.selection, ovsx_token=bool(os.environ.get("OVSX_PAT")),
+                      ready=lambda names: crates_io_readiness(load(files_on_disk()), root(), only=names))
         elif args.command == "verify":
             verify(args.registry, args.selection, timeout=args.timeout)
         elif args.command == "consume":

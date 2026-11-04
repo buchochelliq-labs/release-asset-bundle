@@ -1,0 +1,8 @@
+[package]
+name = "onto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "onto"
+publish = false
