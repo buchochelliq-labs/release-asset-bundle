@@ -888,20 +888,32 @@ def download(url):
         return response.read()
 
 
-def tree_of(commit):
-    """The tree of a commit in this repository, from the GitHub API: the CI
-    run's commit need not be in the release checkout."""
-    status, _, body = github_api(f"/repos/{repository()}/git/commits/{commit}")
+def changes_since(built, tagged):
+    """How `tagged` relates to `built` in this repository, from the GitHub API
+    (the CI run's commit need not be in the release checkout): the compare
+    status (`identical`, `ahead`, `behind` or `diverged`) and the files that
+    differ between them."""
+    status, _, body = github_api(f"/repos/{repository()}/compare/{built}...{tagged}")
     if status != 200:
-        raise RuntimeError(f"cannot read commit {commit} of {repository()} (HTTP {status})")
-    return json.loads(body)["tree"]["sha"]
+        raise RuntimeError(f"cannot compare {built} with {tagged} in {repository()} (HTTP {status})")
+    data = json.loads(body)
+    return data.get("status"), [entry["filename"] for entry in data.get("files") or []]
 
 
-def promote(job, out, tagged_tree=None):
+def version_in(name, version):
+    """Whether a file name carries exactly `version` (optionally as `v1.0`, as
+    rust-binary archives do): not `11.0` or `1.0.1` for `1.0`, nor its
+    pre-release `1.0rc1` or a local `1.0+x`."""
+    return re.search(rf"(?<![0-9A-Za-z.])v?{re.escape(version)}(?![0-9A-Za-z+]|\.[0-9])", name) is not None
+
+
+def promote(job, out, tagged=None):
     """Copy the files of one pinned CI artifact into `out`, unchanged, after
     proving they are the reviewed bytes of this release: the archive has the
-    pinned SHA-256, has not expired, and was built from a commit whose tree is
-    the tagged commit's tree (rule 4: a release is one commit's files)."""
+    pinned SHA-256 and has not expired, and the tagged commit is the commit
+    that built it, or a descendant that changes nothing but `release-kit.yml`
+    (rule 4: a release is one commit's files). The pin cannot be in the commit
+    the artifact was built from, so the commit that records it is allowed."""
     ident, pinned = job["artifact"], job["sha256"]
     where = f"{job['package']}: CI artifact {ident}"
     status, _, body = github_api(f"/repos/{repository()}/actions/artifacts/{ident}")
@@ -915,10 +927,15 @@ def promote(job, out, tagged_tree=None):
     built = (meta.get("workflow_run") or {}).get("head_sha")
     if not built:
         raise RuntimeError(f"{where}: GitHub does not say which commit built it")
-    tagged = tagged_tree or git("rev-parse", "HEAD^{tree}")
-    if tree_of(built) != tagged:
-        raise RuntimeError(f"{where} was built from {built[:12]}, whose files differ from the tagged commit's: "
-                           "a release is one commit. Pin an artifact built from these files.")
+    tagged = tagged or git("rev-parse", "HEAD")
+    relation, changed = changes_since(built, tagged)
+    if relation not in ("identical", "ahead"):
+        raise RuntimeError(f"{where} was built from {built[:12]}, which the tagged commit does not descend from "
+                           f"({relation}): a release is one commit. Pin an artifact built on this branch.")
+    if other := [name for name in changed if name != CONFIG]:
+        raise RuntimeError(f"{where} was built from {built[:12]}; since then {', '.join(other[:5])}"
+                           f"{' and more' if len(other) > 5 else ''} changed: a release is one commit. "
+                           f"Only {CONFIG} (the pin itself) may change after the build.")
     status, headers, body = github_api(f"/repos/{repository()}/actions/artifacts/{ident}/zip")
     location = {k.lower(): v for k, v in headers.items()}.get("location")
     if status in (301, 302, 303, 307, 308) and location:
@@ -943,7 +960,7 @@ def promote(job, out, tagged_tree=None):
             target = out / parts[-1]
             if target.exists():
                 raise RuntimeError(f"{where}: two members are named {parts[-1]}")
-            if version not in parts[-1]:
+            if not version_in(parts[-1], version):
                 raise RuntimeError(f"{where}: {parts[-1]} is not version {version} of {job['package']}")
             target.write_bytes(archive.read(info))
             copied.append(target)
