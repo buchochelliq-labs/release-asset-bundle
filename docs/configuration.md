@@ -262,11 +262,21 @@ anything is published, unless:
 
 - the archive's SHA-256 is `sha256`, and GitHub records the same digest;
 - the artifact has not expired;
-- the commit that built it has the **same files (git tree)** as the tagged
-  commit. This is rule 4: a CI run on a release-candidate branch qualifies once
-  that branch is merged to `main` unchanged; a run on any other files does not;
-- every member matching `files` (a glob over the archive's paths) carries the
-  package's version in its name (PEP 440 form for PyPI), and at least one does.
+- the tagged commit **is the commit that built it, or descends from it and
+  changes nothing but `release-kit.yml`**. This is rule 4. The artifact must
+  exist before its id can be pinned, so the pin can never be in the commit that
+  built it: the commit that records the pin is allowed, any other change is
+  not. A CI run on a release-candidate branch qualifies once that branch is
+  merged to `main` with nothing else changed; a run on other files, or on a
+  commit the tag does not descend from, does not;
+- every member matching `files` (a glob over the archive's paths) carries
+  exactly the package's version in its name (PEP 440 form for PyPI, optionally
+  as `v<version>`): `pkg-11.0`, `pkg-1.0.1` and `pkg-1.0rc1` are not `1.0`. At
+  least one member must match.
+
+The usual order is: the CI run builds the artifact on the release branch; a
+commit then pins its `artifact` and `sha256` in `release-kit.yml`; that commit
+(or `main` after the release branch merges) is tagged.
 
 The matching members are copied into `dist` under their own names, and the
 artifact's `test` (if any) runs on them as for any other kind. Only this kind's

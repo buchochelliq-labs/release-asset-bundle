@@ -220,7 +220,7 @@ class CiArtifact(unittest.TestCase):
                 "version": "1.0", "registry": "pypi", "artifact": 42,
                 "sha256": hashlib.sha256(data).hexdigest(), "files": "dist/*.whl", "test": None, **extra}
 
-    def github(self, data, meta=None, built_tree="T1"):
+    def github(self, data, meta=None, compare=("ahead", ["release-kit.yml"])):
         import hashlib
         meta = {"expired": False, "digest": "sha256:" + hashlib.sha256(data).hexdigest(),
                 "workflow_run": {"head_sha": "c0ffee" * 6 + "abcd"}, **(meta or {})}
@@ -228,8 +228,9 @@ class CiArtifact(unittest.TestCase):
         def api(path, accept=None):
             if path.endswith("/zip"):
                 return 302, {"Location": "https://blob.example/a.zip?sig=x"}, b""
-            if "/git/commits/" in path:
-                return 200, {}, json.dumps({"tree": {"sha": built_tree}}).encode()
+            if "/compare/" in path:
+                relation, files = compare
+                return 200, {}, json.dumps({"status": relation, "files": [{"filename": f} for f in files]}).encode()
             return 200, {}, json.dumps(meta).encode()
         return api
 
@@ -268,21 +269,30 @@ class CiArtifact(unittest.TestCase):
         data = self.archive({self.WHEEL: b"reviewed wheel", "evidence/log.txt": b"not published"})
         self.assertEqual(self.promote(data), [("pkg-1.0-py3-none-any.whl", b"reviewed wheel")])
 
+    def test_the_commit_that_records_the_pin_may_follow_the_build(self):
+        # The pin cannot be in the commit that built the artifact: the commit
+        # that records it, changing only release-kit.yml, is the same release.
+        data = self.archive({self.WHEEL: b"reviewed wheel"})
+        for compare in (("identical", []), ("ahead", ["release-kit.yml"])):
+            self.assertEqual(self.promote(data, compare=compare), [("pkg-1.0-py3-none-any.whl", b"reviewed wheel")])
+
     def test_promotion_fails_closed(self):
         data = self.archive({self.WHEEL: b"reviewed wheel"})
         cases = [
             ("the archive's SHA-256", dict(job=self.job(data, sha256="0" * 64), meta={"digest": None})),
             ("GitHub records", dict(meta={"digest": "sha256:" + "1" * 64})),
             ("has expired", dict(meta={"expired": True})),
-            ("a release is one commit", dict(built_tree="T2")),
+            ("does not descend from", dict(compare=("diverged", ["release-kit.yml"]))),
+            ("src/app.py changed", dict(compare=("ahead", ["release-kit.yml", "src/app.py"]))),
             ("no member matches", dict(job=self.job(data, files="dist/*.tar.gz"))),
         ]
         for message, kwargs in cases:
             with self.assertRaisesRegex(RuntimeError, message):
                 self.promote(data, **kwargs)
-        stale = self.archive({"dist/pkg-0.9-py3-none-any.whl": b"old"})
-        with self.assertRaisesRegex(RuntimeError, "is not version 1.0"):
-            self.promote(stale)
+        for wrong in ("pkg-0.9", "pkg-11.0", "pkg-1.0rc1", "pkg-1.0.1"):
+            stale = self.archive({f"dist/{wrong}-py3-none-any.whl": b"other version"})
+            with self.assertRaisesRegex(RuntimeError, "is not version 1.0", msg=wrong):
+                self.promote(stale)
         unsafe = self.archive({"dist/../pkg-1.0-py3-none-any.whl": b"x"})
         with self.assertRaisesRegex(RuntimeError, "unsafe path"):
             self.promote(unsafe, job=self.job(unsafe, files="dist/*"))
