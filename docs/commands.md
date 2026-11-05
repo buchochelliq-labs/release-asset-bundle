@@ -367,6 +367,34 @@ run's token is missing it refuses before uploading anything. Then it runs one
 `onto-cli` with the trusted one. Publishing several crates in one `cargo
 publish` needs Cargo 1.90 or later.
 
+### `pypi-upload`
+
+```sh
+release.py pypi-upload --dir DIR [--attestations true|false]
+```
+
+Uploads every `.whl` and `.tar.gz` in `--dir` to PyPI with Trusted
+Publishing; the [publish-pypi action](registries/pypi.md#publish) runs it
+with the Python of a virtualenv holding twine and pypi-attestations. In
+order:
+
+1. `twine check` on every file;
+2. a short-lived API token: `GET https://pypi.org/_/oidc/audience`, GitHub's
+   OIDC token for that audience (`ACTIONS_ID_TOKEN_REQUEST_URL`, which needs
+   `id-token: write`), and `POST https://pypi.org/_/oidc/mint-token`. The
+   token is masked (`::add-mask::`) before anything else runs. When PyPI
+   refuses the exchange, the error shows PyPI's reasons and the token's
+   claims (repository, workflow, environment) to compare with the trusted
+   publisher;
+3. with `--attestations true` (the default), `pypi-attestations sign`, which
+   writes a PEP 740 attestation beside each file, signed with the job's
+   identity through Sigstore;
+4. each file's sha256, md5 and blake2_256;
+5. `twine upload --verbose --attestations` with the token.
+
+There is no `--skip-existing`: `preflight` has already refused a version
+PyPI has.
+
 ### `verify`
 
 ```sh

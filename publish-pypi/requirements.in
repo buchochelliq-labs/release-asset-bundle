@@ -1,0 +1,6 @@
+# What publish-pypi installs to upload (twine) and attest (pypi-attestations),
+# the versions pypa/gh-action-pypi-publish v1.14.3 ran. requirements.txt is
+# compiled from this file, with every hash; see its header to regenerate it.
+twine==7.0.0
+pypi-attestations==0.0.30
+sigstore==4.5.1

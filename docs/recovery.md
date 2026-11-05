@@ -83,7 +83,12 @@ that are still due, merge, and release the new versions.
 - **PyPI:** the package counts as published as soon as the version exists on
   PyPI, that is, once any one of its files is up. If an upload stopped after
   some wheels, a re-run does not upload the rest. Upload the missing files
-  from the run's build artifacts by hand (for example with `twine upload`).
+  from the run's build artifacts by hand (for example with `twine upload`);
+  files uploaded by hand have no attestations (only the release job's
+  identity can sign them). A `publish-pypi` job that failed before
+  uploading anything, as every PyPI release with rab 2.0.0 did (see the
+  [changelog](changelog.md#v201)), leaves nothing on PyPI: install rab 2.0.1
+  or later and run `tag` again, and the new run publishes only PyPI.
 - **GitHub Releases:** a package counts as published once its release has at
   least one asset. If an upload stopped partway, a re-run does not upload the
   rest. Check the release's files against the build artifacts, and upload any

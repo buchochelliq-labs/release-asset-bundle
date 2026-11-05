@@ -1452,6 +1452,7 @@ class Install(unittest.TestCase):
         for path in [".github/rab/scripts/release.py", ".github/rab/gate/action.yml",
                      ".github/rab/plan/action.yml", ".github/rab/build/action.yml",
                      ".github/rab/publish-github/action.yml", ".github/workflows/rab-build.yml",
+                     ".github/rab/publish-pypi/requirements.txt",
                      ".github/workflows/release.yml", ".github/rab/manifest.json"]:
             self.assertIn(path, written)
             self.assertTrue((self.repo / path).is_file(), path)
@@ -2281,6 +2282,229 @@ class CratesIoReadinessParts(unittest.TestCase):
         self.assertEqual(calls[-1], (["publish", "--dry-run", "--locked", "--allow-dirty",
                                       "-p", "core", "-p", "tool"], base))
         self.assertEqual(len(calls), 3, "one locate-project per crate, one dry run per workspace")
+
+
+def jwt(claims):
+    import base64
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).decode().rstrip("=")
+    return f"eyJhbGciOiJSUzI1NiJ9.{payload}.c2ln"
+
+
+class PypiUpload(unittest.TestCase):
+    """v2.0.1: publish-pypi exchanges the job's OIDC token for a PyPI token and
+    uploads with twine itself; pypa/gh-action-pypi-publish's Docker image
+    cannot be found from inside a composite action."""
+
+    ENV = {"ACTIONS_ID_TOKEN_REQUEST_URL": "https://token.actions/oidc?api-version=2.0",
+           "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-t"}
+    CLAIMS = {"sub": "repo:o/r:environment:pypi", "repository": "o/r", "workflow_ref":
+              "o/r/.github/workflows/release.yml@refs/tags/release-1.0.0", "environment": "pypi"}
+
+    def setUp(self):
+        self.calls = []
+        self.oidc = jwt(self.CLAIMS)
+        self.answers = {
+            "https://pypi.org/_/oidc/audience": (200, b'{"audience": "pypi"}'),
+            "https://token.actions/oidc?api-version=2.0&audience=pypi": (200, json.dumps({"value": self.oidc}).encode()),
+            "https://pypi.org/_/oidc/mint-token": (200, b'{"success": true, "token": "pypi-minted", "expires": 1}'),
+        }
+
+    def fetch(self, url, data=None, headers=None):
+        self.calls.append((url, data, headers))
+        return self.answers[url]
+
+    def token(self, **kw):
+        with unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            token = release.pypi_token(env=kw.pop("env", self.ENV), fetch=self.fetch, **kw)
+        return token, out.getvalue()
+
+    def test_the_token_is_minted_from_the_job_s_oidc_token_and_masked(self):
+        token, out = self.token()
+        self.assertEqual(token, "pypi-minted")
+        self.assertEqual(out, "::add-mask::pypi-minted\n")
+        audience, oidc, mint = self.calls
+        self.assertEqual(audience[0], "https://pypi.org/_/oidc/audience")
+        self.assertEqual(oidc[2], {"Authorization": "bearer request-t"}, "GitHub's request token, as a bearer")
+        self.assertEqual(json.loads(mint[1]), {"token": self.oidc})
+        self.assertEqual(mint[2], {"Content-Type": "application/json"})
+
+    def test_the_audience_comes_from_the_index(self):
+        self.answers["https://test.pypi.org/_/oidc/audience"] = (200, b'{"audience": "testpypi"}')
+        self.answers["https://token.actions/oidc?api-version=2.0&audience=testpypi"] = self.answers.pop(
+            "https://token.actions/oidc?api-version=2.0&audience=pypi")
+        self.answers["https://test.pypi.org/_/oidc/mint-token"] = self.answers["https://pypi.org/_/oidc/mint-token"]
+        self.assertEqual(self.token(index="https://test.pypi.org")[0], "pypi-minted")
+
+    def test_without_id_token_write_it_says_so_before_asking_github(self):
+        with self.assertRaisesRegex(RuntimeError, "permissions: id-token: write"):
+            self.token(env={})
+        self.assertEqual(len(self.calls), 1, "only the audience was fetched")
+
+    def test_github_refusing_the_oidc_token_is_explained(self):
+        self.answers["https://token.actions/oidc?api-version=2.0&audience=pypi"] = (403, b'{"message": "no"}')
+        with self.assertRaisesRegex(RuntimeError, r"GitHub refused an OIDC token for audience 'pypi' \(403\)"):
+            self.token()
+
+    def test_a_refused_exchange_shows_pypi_s_reasons_and_the_claims(self):
+        self.answers["https://pypi.org/_/oidc/mint-token"] = (422, json.dumps({"message": "Token request failed",
+            "errors": [{"code": "invalid-publisher", "description": "valid token, but no corresponding publisher "
+                        "(Publisher with matching claims was not found)"}]}).encode())
+        with self.assertRaises(RuntimeError) as caught:
+            self.token()
+        message = str(caught.exception)
+        self.assertIn("https://pypi.org refused the Trusted Publishing exchange (422):", message)
+        self.assertIn("invalid-publisher: valid token, but no corresponding publisher", message)
+        self.assertIn("workflow_ref: o/r/.github/workflows/release.yml@refs/tags/release-1.0.0", message)
+        self.assertIn("environment: pypi", message)
+        self.assertIn("job_workflow_ref: MISSING", message)
+        self.assertNotIn("pypi-minted", message)
+
+    def test_an_index_without_trusted_publishing_or_a_broken_answer_fails(self):
+        for answer, error in [((404, b""), "does not offer Trusted Publishing"),
+                              ((403, b""), "has Trusted Publishing disabled"),
+                              ((503, b"<html>"), "answered 503 without an audience")]:
+            self.answers["https://pypi.org/_/oidc/audience"] = answer
+            with self.subTest(answer=answer), self.assertRaisesRegex(RuntimeError, error):
+                self.token()
+        self.setUp()
+        self.answers["https://pypi.org/_/oidc/mint-token"] = (502, b"<html>bad gateway</html>")
+        with self.assertRaisesRegex(RuntimeError, "mint-token answered an unexpected 502"):
+            self.token()
+        self.answers["https://pypi.org/_/oidc/mint-token"] = (200, b'{"success": true}')
+        with self.assertRaisesRegex(RuntimeError, "answered without a token"):
+            self.token()
+
+    def upload(self, d, **kw):
+        commands = []
+
+        def runner(command, env=None):
+            commands.append((command, env))
+            if command[2:4] == ["pypi_attestations", "sign"]:
+                for dist in command[4:]:
+                    Path(f"{dist}.publish.attestation").write_text("{}")
+        with unittest.mock.patch("sys.stdout", new_callable=io.StringIO) as out:
+            files = release.pypi_upload(d, env=self.ENV, fetch=self.fetch, runner=runner, python="py", **kw)
+        return commands, files, out.getvalue()
+
+    def dists(self, d):
+        for name in ["pkg-1.0.0-py3-none-any.whl", "pkg-1.0.0.tar.gz", "notes.txt"]:
+            (Path(d) / name).write_bytes(b"x")
+
+    def test_twine_uploads_with_the_minted_token_and_attestations(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.dists(d)
+            commands, files, out = self.upload(d)
+            wheel, sdist = f"{d}/pkg-1.0.0-py3-none-any.whl", f"{d}/pkg-1.0.0.tar.gz"
+            self.assertEqual([c for c, _ in commands], [
+                ["py", "-m", "twine", "check", wheel, sdist],
+                ["py", "-m", "pypi_attestations", "sign", wheel, sdist],
+                ["py", "-m", "twine", "upload", "--verbose", "--disable-progress-bar", "--non-interactive",
+                 "--attestations", wheel, f"{wheel}.publish.attestation", sdist, f"{sdist}.publish.attestation"]])
+            self.assertEqual(commands[-1][1], {"TWINE_USERNAME": "__token__", "TWINE_PASSWORD": "pypi-minted",
+                                               "TWINE_REPOSITORY_URL": "https://upload.pypi.org/legacy/"})
+            self.assertNotIn("--skip-existing", commands[-1][0], "preflight refused what PyPI has")
+            self.assertEqual(len(files), 4)
+        self.assertTrue(out.startswith("::add-mask::pypi-minted\n"), "masked before anything else is printed")
+        self.assertIn("  sha256: 2d711642b726b04401627ca9fbac32f5c8530fb1903cc4db02258717921a4881", out)
+        self.assertIn("blake2_256: ", out)
+
+    def test_without_attestations_nothing_is_signed(self):
+        with tempfile.TemporaryDirectory() as d:
+            self.dists(d)
+            commands, files, _ = self.upload(d, attestations=False)
+        self.assertEqual([c[3] for c, _ in commands], ["check", "upload"])
+        self.assertNotIn("--attestations", commands[-1][0])
+        self.assertEqual(len(files), 2)
+
+    def test_nothing_is_uploaded_when_the_exchange_fails(self):
+        self.answers["https://pypi.org/_/oidc/mint-token"] = (422, b'{"errors": []}')
+        with tempfile.TemporaryDirectory() as d:
+            self.dists(d)
+            with self.assertRaisesRegex(RuntimeError, "refused the Trusted Publishing exchange"):
+                self.upload(d)
+
+    def test_an_empty_directory_or_a_stale_attestation_is_refused(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaisesRegex(RuntimeError, "no wheels or sdists"):
+                self.upload(d)
+            self.dists(d)
+            (Path(d) / "pkg-1.0.0.tar.gz.publish.attestation").write_text("{}")
+            with self.assertRaisesRegex(RuntimeError, "already attested, from an earlier step: pkg-1.0.0.tar.gz"):
+                self.upload(d)
+
+    def test_the_command_line(self):
+        with unittest.mock.patch.object(release, "pypi_upload") as upload:
+            self.assertEqual(release.main(["pypi-upload", "--dir", "d", "--attestations", "false"]), 0)
+        upload.assert_called_once_with("d", attestations=False)
+
+    def test_http_answer_returns_an_error_s_body(self):
+        from urllib.error import HTTPError
+        error = HTTPError("https://pypi.org/_/oidc/mint-token", 422, "Unprocessable", {}, io.BytesIO(b'{"errors": []}'))
+        with unittest.mock.patch.object(release, "urlopen", side_effect=error):
+            self.assertEqual(release.http_answer("https://pypi.org/_/oidc/mint-token"), (422, b'{"errors": []}'))
+
+
+class NoDockerInComposites(unittest.TestCase):
+    """v2.0.1: a composite action cannot run an action that finds its Docker
+    image from `github.action_repository`/`action_ref` (pypa/gh-action-pypi-publish:
+    nested, it gets the caller's repository and ref). Every action a kit
+    composite uses was read at its pinned commit; a new one is read before it is
+    added here."""
+
+    DOCKER_BASED = {"pypa/gh-action-pypi-publish"}
+    # runs.using at the pinned commit (and what it runs, where it nests).
+    READ = {
+        "actions/setup-python": "node24",
+        "actions/setup-node": "node24",
+        "dtolnay/rust-toolchain": "composite (run steps only)",
+        "PyO3/maturin-action": "node24 (its manylinux images are named from its inputs)",
+        "actions/attest-build-provenance": "composite (actions/attest, node24)",
+    }
+
+    def problems(self, where, document):
+        problems = []
+        if document["runs"]["using"] != "composite":
+            problems.append(f"{where}: runs.using is {document['runs']['using']}, not composite")
+        for step in every_step(document):
+            uses = step.get("uses")
+            if not uses or uses.startswith("./"):
+                continue
+            name = uses.split("@")[0]
+            if uses.startswith("docker://") or name in self.DOCKER_BASED:
+                problems.append(f"{where}: {uses} is Docker-based")
+            elif name not in self.READ:
+                problems.append(f"{where}: {name} has not been read (is it Docker-based, or does it read "
+                                "github.action_repository?)")
+        return problems
+
+    def test_no_composite_uses_a_docker_action(self):
+        problems = [p for action in sorted(KIT.glob("*/action.yml"))
+                    for p in self.problems(action.relative_to(KIT).as_posix(), kit_yaml(action.relative_to(KIT)))]
+        self.assertEqual(problems, [])
+
+    def test_the_check_refuses_v2_0_0_s_step_an_image_and_an_unread_action(self):
+        document = {"runs": {"using": "composite", "steps": [
+            {"uses": "pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086"},
+            {"uses": "docker://alpine:3.20"}, {"uses": "someone/new-action@" + "0" * 40},
+            {"uses": "actions/setup-python@" + "0" * 40}, {"uses": "./local"}, {"run": "true"}]}}
+        self.assertEqual(self.problems("x", document), [
+            "x: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 is Docker-based",
+            "x: docker://alpine:3.20 is Docker-based",
+            "x: someone/new-action has not been read (is it Docker-based, or does it read github.action_repository?)"])
+        self.assertEqual(self.problems("y", {"runs": {"using": "docker", "image": "Dockerfile"}}),
+                         ["y: runs.using is docker, not composite"])
+
+    def test_publish_pypi_installs_its_tools_from_hashes(self):
+        steps = list(every_step(kit_yaml("publish-pypi/action.yml")))
+        install = next(s["run"] for s in steps if "requirements.txt" in s.get("run", ""))
+        self.assertIn("--require-hashes", install)
+        self.assertIn("pypi-upload", next(s["run"] for s in steps if "pypi-upload" in s.get("run", "")))
+        lock = (KIT / "publish-pypi" / "requirements.txt").read_text()
+        for pin in ["twine==7.0.0", "pypi-attestations==0.0.30", "sigstore==4.5.1"]:
+            self.assertIn(pin, lock)
+        for line in lock.splitlines():
+            if re.match(r"[a-z]", line):
+                self.assertRegex(line, r"^[\w.-]+==[\w.]+ ", "every requirement is an exact pin")
 
 
 if __name__ == "__main__":
