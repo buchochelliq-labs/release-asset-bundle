@@ -1106,6 +1106,22 @@ class ReleaseRecord(unittest.TestCase):
     def by_name(self, document):
         return {p["name"]: p for p in document["packages"]}
 
+    def test_a_crate_does_not_take_the_files_of_a_same_named_python_package(self):
+        # rs-rich-cli 0.0.25: crates.io rs-rich was recorded with PyPI rs-rich's wheels.
+        files = dict(self.FILES)
+        files["pc/Cargo.toml"] = '[package]\nname = "tool-py"\nversion = "0.2.0"\n'
+        files["rab.yml"] = files["rab.yml"].replace(
+            "  - name: tool-py\n",
+            "  - {name: tool-py, registry: crates.io, manifest: pc/Cargo.toml, version: '0.2.0'}\n"
+            "  - name: tool-py\n", 1)
+        self.FILES = files
+        document = self.record(self.selection("tool-py"),
+                               self.needs(publish_crates="success", publish_pypi="success"))
+        both = [p for p in document["packages"] if p["name"] == "tool-py"]
+        self.assertEqual([(p["registry"], [f["name"] for f in p["files"]]) for p in both],
+                         [("crates.io", []),
+                          ("pypi", ["tool_py-0.2.0-py3-none-any.whl", "tool_py-0.2.0.tar.gz"])])
+
     def test_a_complete_run(self):
         import hashlib
         self.published.add("core")  # before the run: the gate does not select it

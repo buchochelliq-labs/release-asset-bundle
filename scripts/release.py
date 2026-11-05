@@ -2203,7 +2203,9 @@ def record(tag_name, sha, selection, verify_only, needs, dist="dist", read=None,
                     there = None
                 outcome = ("unknown" if there is None else on_registry if there
                            else "skipped" if job == "skipped" else "failed")
-            files = built_files(dist, package.slug)
+            # Build artifacts are named by slug, not registry: a package that
+            # builds nothing (a crate) must not take a same-named one's files.
+            files = built_files(dist, package.slug) if package.artifacts else []
         if selected:
             # Done: its own upload (when due) and, outside a verify-only run
             # (which runs no channel job), every channel due for it.
