@@ -37,6 +37,44 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ## Changelog
 
+### v2.0.1
+
+**Fixed: `publish-pypi` uploaded nothing.** It ran
+`pypa/gh-action-pypi-publish`, which runs a Docker image it names from the
+calling action's repository and ref. Nested in rab's composite action those
+are not set, so it fell back to the release's own repository and tag:
+rs-rich-cli's first rab release ran `docker run …
+ghcr.io/buchochelliq-labs/rs-rich-cli:release-0.0.25` and was `denied`. pypa
+documents that the action does not work from a composite action (called
+directly from a job, as rs-rich-cli's old workflow did, it works).
+
+`publish-pypi` now does the upload itself, with no Docker action: it
+installs twine 7.0.0 and pypi-attestations 0.0.30 into a virtualenv from its
+new `requirements.txt` (`pip install --require-hashes`, every package pinned
+with its hashes), and runs the new `release.py pypi-upload`. That exchanges
+the job's OIDC token for a short-lived PyPI token as
+[PyPI documents](https://docs.pypi.org/trusted-publishers/using-a-publisher/)
+(`/_/oidc/audience`, GitHub's OIDC token, `/_/oidc/mint-token`), masks it,
+signs PEP 740 attestations with `pypi-attestations sign`, prints each file's
+digests, and runs `twine upload --attestations`. A refused exchange shows
+PyPI's reasons and the token's claims. Attestations are kept, as the pypa
+action made them; the new `attestations: "false"` input turns them off. The
+trusted publisher on PyPI does not change. See [PyPI](registries/pypi.md#publish).
+
+A test now refuses a Docker-based action (`docker://`,
+`pypa/gh-action-pypi-publish`) in any rab composite, and any third-party
+action there that has not been read at its pinned commit. The others were
+read: `actions/setup-python`, `actions/setup-node` and `PyO3/maturin-action`
+are Node actions (maturin-action's manylinux images are named from its
+inputs), `dtolnay/rust-toolchain` is a composite of shell steps, and
+`actions/attest-build-provenance` is a composite around the Node action
+`actions/attest`; none reads `github.action_repository` or `action_ref`.
+
+**To pick it up**, install v2.0.1 (`release.yml` does not change: `install`
+adds `.github/rab/publish-pypi/requirements.txt`). A release whose
+`publish-pypi` job failed this way published nothing on PyPI: after
+installing, run `release.py tag` again and the new run publishes only PyPI.
+
 ### v2.0.0
 
 **release-kit is now rab, the Release Asset Bundle** (BAB, after its

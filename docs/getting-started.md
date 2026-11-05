@@ -26,6 +26,7 @@ python3 ../release-asset-bundle/scripts/release.py install
 |---|---|
 | `.github/rab/scripts/release.py` | the driver script |
 | `.github/rab/<action>/action.yml` | the composite actions: `build`, `gate`, `plan`, `publish-crates`, `publish-github`, `publish-npm`, `publish-pypi`, `publish-vscode` |
+| `.github/rab/publish-pypi/requirements.txt` | what `publish-pypi` installs to upload (twine, pypi-attestations), every hash pinned |
 | `.github/rab/README.md` | a notice: do not edit, reinstall instead |
 | `.github/rab/manifest.json` | the kit's version and commit, and a SHA-256 checksum of every installed file |
 | `.github/workflows/rab-build.yml` | the reusable build workflow |
