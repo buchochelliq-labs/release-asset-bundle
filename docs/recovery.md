@@ -93,6 +93,8 @@ commit. Packages not yet published are tagged there. The release tag records
 `Carried-from: <old commit>`, and the gate checks it again: that commit must be
 an ancestor, and no package tagged there may ship different files. `tag`
 carries only when you ask with `--commit`, and never while that run is live.
+If the carried run fails too (a channel, say), run `tag` again: the
+`Carried-from:` trailer keeps the release on the new commit.
 
 If the fix must change files that the tagged commit ships, the release cannot
 move there: that would split it (rule 4). Bump the versions of the packages
