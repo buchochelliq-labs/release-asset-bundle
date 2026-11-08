@@ -101,7 +101,9 @@ Tags the release and waits for its run to publish it.
 
 1. `--commit`, if given. A release tagged on an earlier commit whose run has
    ended is carried here when this commit ships the same files
-   (`carry` below).
+   (`carry` below). Without `--commit`, when the commit chosen below fails
+   `check` and `HEAD` (on the default branch, the same release) passes it,
+   `HEAD` is used the same way, with a `note`.
 2. Otherwise, a release that is already tagged and not finished: the one named
    by `--release`, or else the newest tagged release (by version) if it
    still has a due package, or a published `github` package whose Homebrew
