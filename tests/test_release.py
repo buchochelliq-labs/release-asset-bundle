@@ -1663,6 +1663,18 @@ class OldNames(unittest.TestCase):
         self.assertEqual(release.VERSION, newest)
         self.assertNotIn("### Unreleased", changelog.split(f"### v{newest}")[0])
 
+    def test_versions_have_no_gaps(self):
+        # Each version is the next patch, minor or major after the one below
+        # it (docs/changelog.md, "How rab is versioned"); checked from v2.0.0.
+        changelog = (KIT / "docs" / "changelog.md").read_text(encoding="utf-8")
+        versions = [tuple(map(int, v)) for v in re.findall(r"^### v(\d+)\.(\d+)\.(\d+)\s*$", changelog, re.M)]
+        versions = [v for v in versions if v >= (2, 0, 0)]
+        for newer, older in zip(versions, versions[1:]):
+            major, minor, patch = older
+            allowed = {(major, minor, patch + 1), (major, minor + 1, 0), (major + 1, 0, 0)}
+            self.assertIn(newer, allowed, f"v{'.'.join(map(str, newer))} does not follow "
+                                          f"v{'.'.join(map(str, older))}")
+
 
 class Migrate(unittest.TestCase):
     """`install` into a repository with release-kit 1.x's layout moves it to rab's."""
