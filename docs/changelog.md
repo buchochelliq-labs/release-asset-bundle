@@ -37,17 +37,6 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ## Changelog
 
-### v2.1.1
-
-**Fixed: a carried release could not be finished again.** After `tag
---commit` carried a release, the newest run is on the new commit, so a second
-`tag` (after, say, Chocolatey failed in the carried run) no longer saw the
-run on the old commit stop, skipped the channels of the packages published
-there, and printed that every package was published. The release tag's
-`Carried-from:` now keeps the carry: while no run is live, `tag` (with or
-without `--commit`) finishes the release from the commit it was carried to,
-and keeps the trailer on the new release tag.
-
 ### v2.1.0
 
 **Added: carry a stopped release to a later commit.** A re-run of a release
@@ -60,7 +49,9 @@ packages keep their records and their Homebrew and Chocolatey channels are
 finished from `<sha>`; unpublished packages are tagged there. It applies only
 when `<sha>` descends from the tagged commit and ships the same files for every
 package (the split check), and never while the run is live. The release tag
-records `Carried-from:`, and the gate checks it. See
+records `Carried-from:`, and the gate checks it. If the carried run fails too
+(a channel, say), `tag` again, with or without `--commit`, finishes the
+release from the commit it was carried to. See
 [recovery](recovery.md#case-2-the-run-published-part-of-the-release).
 
 **Fixed: `check` missed a crate listed before one it dev-depends on.** Cargo
