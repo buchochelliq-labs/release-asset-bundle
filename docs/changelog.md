@@ -37,6 +37,17 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ## Changelog
 
+### Unreleased
+
+**Fixed: `publish-chocolatey` failed on Windows before packing.** Its bash
+step read `jq`'s output, and on Windows `jq` ends each line with CRLF; bash
+kept the `\r`, so open-data-suite's v0.1.3 release read the package slug as
+`ods\r` and `gh release download` could not create the directory
+(`The filename, directory name, or volume label syntax is incorrect`).
+The step now strips carriage returns from everything `jq` prints, which also
+keeps them out of the package's `test` command. A test runs the step under bash
+with a `jq` that writes CRLF.
+
 ### v2.0.1
 
 **Fixed: `publish-pypi` uploaded nothing.** It ran
