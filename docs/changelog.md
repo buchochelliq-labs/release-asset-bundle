@@ -10,6 +10,12 @@ rab (release-kit until 1.7.0) is tagged `vX.Y.Z`:
 - a **major** (`v3.0.0`) needs repositories to change their configuration or
   workflow. Each repository moves when it installs the new version.
 
+**Versions have no gaps.** Each version is the next patch, minor or major after
+the one before it (`v2.0.2` → `v2.0.3`, `v2.1.0` or `v3.0.0`), and every
+version in this changelog is tagged. A fix to a version that is merged but not
+yet tagged goes into that version (its `VERSION` and changelog entry), not a
+new one. A test checks this from v2.0.0 on.
+
 `release.py --version` prints the version of the script (`rab 2.0.0`). An
 installed copy records where it came from in `.github/rab/manifest.json`:
 
