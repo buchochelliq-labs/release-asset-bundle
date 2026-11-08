@@ -437,21 +437,34 @@ class Tagging(Repo):
         tags = self.remote_tags()
         self.assertEqual({tags["core-v0.1.0"], tags["release-0.2.0"]}, {later})
 
-    def test_a_tagged_commit_that_fails_the_check_points_at_head(self):
+    def test_a_tagged_commit_that_fails_the_check_is_finished_from_head(self):
+        # As open-data-suite 0.1.3: tagged before its rab.yml was fixed; the
+        # run there stopped; HEAD fixes rab.yml and ships the same files.
         first = sh(self.work, "git", "rev-parse", "HEAD")
         self.tag()
         self.write({"rab.yml": CONFIG + "# fixed on a later commit\n"})
         later = self.commit("fix rab.yml")
-        real = release.check
+        stopped = {"status": "completed", "conclusion": "failure", "url": "u", "head_sha": first,
+                   "publish_started": True}
         broken = lambda read: [] if "# fixed" in read("rab.yml") else ["tool is listed before core"]
         with mock.patch.object(release, "check", broken):
+            with self.assertRaisesRegex(RuntimeError, "not when the commit was asked for|disagrees") as asked:
+                self.tag(commit=first, run=lambda tag: stopped)
+            self.assertNotIn("--commit", str(asked.exception))
+            self.tag(run=lambda tag: stopped)
+        tags = self.remote_tags()
+        self.assertEqual({tags[t] for t in ("core-v0.1.0", "tool-v0.2.0", "release-0.2.0")}, {later})
+        self.assertEqual(release.trailers("release-0.2.0").get("Carried-from"), first)
+
+    def test_a_tagged_commit_that_head_does_not_fix_points_at_head(self):
+        first = sh(self.work, "git", "rev-parse", "HEAD")
+        self.tag()
+        self.write({"README.md": "later\n"})
+        later = self.commit("docs")
+        with mock.patch.object(release, "check", lambda read: ["tool is listed before core"]):
             with self.assertRaisesRegex(RuntimeError, rf"(?s)at {first[:12]} disagrees.*"
                                                       rf"release.py tag --commit {later[:12]}"):
                 self.tag()
-            with self.assertRaises(RuntimeError) as asked:
-                self.tag(commit=first)
-        self.assertNotIn("--commit", str(asked.exception), "not when the commit was asked for")
-        self.assertIs(release.check, real)
 
     def test_a_tag_elsewhere_with_the_same_files_is_waited_for(self):
         self.tag()

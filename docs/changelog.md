@@ -45,13 +45,16 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ### v2.1.0
 
-**Fixed: `tag` did not say how to finish a release whose tagged files fail
-`check`.** Without `--commit`, `tag` goes back to the commit a release is
-tagged at and checks that commit's `rab.yml`. When a later commit has the fix
+**Fixed: `tag` could not finish a release whose tagged files fail `check`.**
+Without `--commit`, `tag` goes back to the commit a release is tagged at and
+checks that commit's `rab.yml`. When a later commit has the fix
 (open-data-suite's 0.1.3, tagged before its crate order was fixed), `tag`
-failed with only the old commit's errors. It now adds that the release is
-tagged there and, when `HEAD` descends from it, the command that finishes it
-from `HEAD`: `release.py tag --commit <HEAD>`.
+failed with only the old commit's errors. Now, when `HEAD` is on the default
+branch, descends from the tagged commit, names the same release and passes
+`check`, `tag` finishes the release from `HEAD` (as `--commit HEAD` would:
+only while the run at the tagged commit has stopped, and only when every
+package ships the same files). Otherwise the error names the command:
+`release.py tag --commit <HEAD>`.
 
 **Added: carry a stopped release to a later commit.** A re-run of a release
 that published part of itself ran on the tagged commit, with that commit's

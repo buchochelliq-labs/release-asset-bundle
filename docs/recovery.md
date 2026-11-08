@@ -92,7 +92,8 @@ channels made from them (Homebrew, Chocolatey) are finished from the new
 commit. Packages not yet published are tagged there. The release tag records
 `Carried-from: <old commit>`, and the gate checks it again: that commit must be
 an ancestor, and no package tagged there may ship different files. `tag`
-carries only when you ask with `--commit`, and never while that run is live.
+carries only when you ask with `--commit`, or when the tagged commit's
+`rab.yml` fails `check` and `HEAD` fixes it, and never while that run is live.
 If the carried run fails too (a channel, say), run `tag` again: the
 `Carried-from:` trailer keeps the release on the new commit.
 
