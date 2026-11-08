@@ -3024,10 +3024,13 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
         if tagged == sha or subprocess.run(["git", "merge-base", "--is-ancestor", tagged, sha],
                                            cwd=root()).returncode:
             return False
-        latest = run(release_at(tagged).tag)
         if carried_to(sha) == tagged:
+            latest = run(release_at(sha).tag)
             return bool(latest and latest["head_sha"] == sha and latest["status"] == "completed")
-        return bool(commit and latest and latest["head_sha"] == tagged and latest["status"] == "completed"
+        if not commit:
+            return False  # nothing to read on `tagged` (it may predate rab.yml)
+        latest = run(release_at(tagged).tag)
+        return bool(latest and latest["head_sha"] == tagged and latest["status"] == "completed"
                     and latest["conclusion"] != "success")
 
     here = load(files_on_disk())

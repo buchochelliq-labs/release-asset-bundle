@@ -507,6 +507,18 @@ class Foreign(Repo):
         with self.assertRaisesRegex(RuntimeError, "already exist for something else"):
             release.gate("release-0.2.0", status=self.status, output=out)
 
+    def test_a_published_package_tagged_before_rab_is_skipped(self):
+        sh(self.work, "git", "rm", "-q", "rab.yml")
+        old = self.commit("before rab")
+        sh(self.work, "git", "tag", "-a", "core-v0.1.0", "-m", "core 0.1.0 (crates.io)", old)
+        sh(self.work, "git", "push", "-q", "origin", "refs/tags/core-v0.1.0")
+        self.write(FILES)
+        later = self.commit("adopt rab")
+        self.published.add(("core", "0.1.0"))
+        self.tag()
+        tags = self.remote_tags()
+        self.assertEqual((tags["core-v0.1.0"], tags["tool-v0.2.0"], tags["release-0.2.0"]), (old, later, later))
+
     def test_a_commit_without_release_kit_yml_is_named(self):
         sh(self.work, "git", "rm", "-q", "rab.yml")
         old = self.commit("before release-kit")
