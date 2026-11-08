@@ -507,6 +507,18 @@ class Foreign(Repo):
         with self.assertRaisesRegex(RuntimeError, "already exist for something else"):
             release.gate("release-0.2.0", status=self.status, output=out)
 
+    def test_a_published_package_tagged_before_rab_is_skipped(self):
+        sh(self.work, "git", "rm", "-q", "rab.yml")
+        old = self.commit("before rab")
+        sh(self.work, "git", "tag", "-a", "core-v0.1.0", "-m", "core 0.1.0 (crates.io)", old)
+        sh(self.work, "git", "push", "-q", "origin", "refs/tags/core-v0.1.0")
+        self.write(FILES)
+        later = self.commit("adopt rab")
+        self.published.add(("core", "0.1.0"))
+        self.tag()
+        tags = self.remote_tags()
+        self.assertEqual((tags["core-v0.1.0"], tags["tool-v0.2.0"], tags["release-0.2.0"]), (old, later, later))
+
     def test_a_commit_without_release_kit_yml_is_named(self):
         sh(self.work, "git", "rm", "-q", "rab.yml")
         old = self.commit("before release-kit")
@@ -2071,6 +2083,28 @@ class FinishChannels(Repo):
         selection = json.loads(self.gate()["selection"])
         self.assertEqual([(s["name"], s["channels"]) for s in selection],
                          [("core", ["crates.io"]), ("tool", ["chocolatey"])])
+
+    def test_a_carried_release_whose_channel_failed_is_finished_again_there(self):
+        self.run_tag()
+        self.published.add(("tool", "0.2.0"))
+        self.write({"README.md": "a fix outside every package\n"})
+        later = self.commit("fix the release tooling")
+        self.states = {"homebrew": "proposed", "chocolatey": "due"}
+        self.run_tag(commit=later, run=lambda tag: self.stopped())
+        # The carried run publishes core, then Chocolatey fails again.
+        self.published.add(("core", "0.1.0"))
+        failed_here = {"status": "completed", "conclusion": "failure", "url": "u2", "head_sha": later,
+                       "publish_started": True}
+        for kw in ({}, {"commit": later}):
+            waits, out = self.run_tag(run=lambda tag: failed_here, **kw)
+            self.assertIn(f"Release 0.2.0 from {later}", out)
+            self.assertIn("finish tool-v0.2.0: tool 0.2.0 (github) is published; chocolatey is due", out)
+            self.assertIn("retag  release-0.2.0: its run ended failure", out)
+            self.assertEqual(waits, [("release-0.2.0", [("tool", "chocolatey")])])
+            self.assertEqual(release.trailers("release-0.2.0"),
+                             {"Release": "0.2.0", "Commit": later, "Carried-from": self.first})
+        selection = json.loads(self.gate()["selection"])
+        self.assertEqual([(s["name"], s["channels"]) for s in selection], [("tool", ["chocolatey"])])
 
     def test_a_release_is_carried_only_when_asked(self):
         self.run_tag()
