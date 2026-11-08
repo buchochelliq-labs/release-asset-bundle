@@ -105,6 +105,44 @@ packages:
         files["rab.yml"] = head + "  - name: " + tool.rstrip() + "\n  - name: " + core
         self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
 
+    def test_a_versioned_dev_dependency_counts_for_the_order(self):
+        # cargo keeps it in the published manifest, so crates.io needs it first
+        files = dict(FILES)
+        files["Cargo.toml"] += '[workspace.dependencies]\ncore = { path = "crates/core", version = "0.1.0" }\n'
+        files["crates/core/Cargo.toml"] += '[dev-dependencies]\ntool.path = "../tool"\n'
+        files["crates/tool/Cargo.toml"] = ('[package]\nname = "tool"\nversion = "0.2.0"\n'
+                                           '[dev-dependencies]\ncore.workspace = true\n')
+        self.assertEqual(release.check(reader(files)), [], "a path-only dev-dependency is stripped")
+        head, core, tool = CONFIG.split("  - name: ")
+        files["rab.yml"] = head + "  - name: " + tool.rstrip() + "\n  - name: " + core
+        self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
+        files["crates/tool/Cargo.toml"] = files["crates/tool/Cargo.toml"].replace(
+            "core.workspace = true", 'core = { path = "../core", version = "0.1" }')
+        self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
+
+    def test_inherited_dev_dependencies_come_from_the_crates_own_workspace(self):
+        workspace = ('[workspace]\nmembers = ["*"]\n[workspace.package]\nversion = "0.1.0"\n'
+                     '[workspace.dependencies]\ncore = { path = "core", version = "0.1.0" }\n')
+        tool = ('[package]\nname = "tool"\nversion = "0.2.0"\n'
+                '[dev-dependencies]\ncore.workspace = true\n')
+        config = CONFIG.replace("crates/", "rust/")
+        head, core, tool_entry = config.split("  - name: ")
+        swapped = head + "  - name: " + tool_entry.rstrip() + "\n  - name: " + core
+        # A workspace below the repository root, and no Cargo.toml at the root.
+        files = {"rust/Cargo.toml": workspace, "rust/core/Cargo.toml": FILES["crates/core/Cargo.toml"],
+                 "rust/tool/Cargo.toml": tool, "rab.yml": config}
+        self.assertEqual(release.check(reader(files)), [])
+        files["rab.yml"] = swapped
+        self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
+        # A root Cargo.toml of another workspace doesn't hide the crate's own.
+        files["Cargo.toml"] = '[workspace]\nmembers = ["other"]\n'
+        self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
+        # `package.workspace` names the root explicitly.
+        files["ws/Cargo.toml"] = workspace.replace('path = "core"', 'path = "../rust/core"')
+        files["rust/Cargo.toml"] = '[workspace]\nmembers = []\n'
+        files["rust/tool/Cargo.toml"] = tool.replace('version = "0.2.0"\n', 'version = "0.2.0"\nworkspace = "../../ws"\n', 1)
+        self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
+
     def test_record_tags_are_distinct_from_each_other_and_the_release_tag(self):
         files = dict(FILES)
         files["rab.yml"] = CONFIG.replace('version: "0.2.0"\n', 'version: "0.2.0"\n    tag: "release-{version}"\n')
@@ -2007,6 +2045,77 @@ class FinishChannels(Repo):
                             before, "a new tag object, which starts a new run")
         message = sh(self.work, "git", "for-each-ref", "refs/tags/release-0.2.0", "--format=%(contents)")
         self.assertIn("tool 0.2.0 (github): homebrew, chocolatey", message)
+
+    def stopped(self):
+        return {"status": "completed", "conclusion": "failure", "url": "u", "head_sha": self.first,
+                "publish_started": True}
+
+    def test_a_stopped_release_is_carried_to_a_later_commit_that_ships_the_same_files(self):
+        # As open-data-suite 0.1.3: the GitHub release went out, then the run
+        # failed before core; the fix is in the release tooling on a later commit.
+        self.run_tag()
+        self.published.add(("tool", "0.2.0"))
+        self.write({"README.md": "a fix outside every package\n"})
+        later = self.commit("fix the release tooling")
+        self.states = {"homebrew": "proposed", "chocolatey": "due"}
+        waits, out = self.run_tag(commit=later, run=lambda tag: self.stopped())
+        self.assertIn("carry  core-v0.1.0: the release run at", out)
+        self.assertIn("carry  release-0.2.0: its run at", out)
+        self.assertIn("finish tool-v0.2.0: tool 0.2.0 (github) is published; chocolatey is due", out)
+        tags = self.remote_tags()
+        self.assertEqual((tags["core-v0.1.0"], tags["release-0.2.0"]), (later, later))
+        self.assertEqual(tags["tool-v0.2.0"], self.first, "a published package keeps its record")
+        self.assertEqual(release.trailers("release-0.2.0"),
+                         {"Release": "0.2.0", "Commit": later, "Carried-from": self.first})
+        self.assertEqual(waits, [("release-0.2.0", [("tool", "chocolatey")])])
+        selection = json.loads(self.gate()["selection"])
+        self.assertEqual([(s["name"], s["channels"]) for s in selection],
+                         [("core", ["crates.io"]), ("tool", ["chocolatey"])])
+
+    def test_a_release_is_carried_only_when_asked(self):
+        self.run_tag()
+        self.published.add(("tool", "0.2.0"))
+        self.write({"README.md": "later\n"})
+        self.commit("later")
+        waits, out = self.run_tag(run=lambda tag: self.stopped())
+        self.assertIn("release 0.2.0 is already tagged there", out)
+        self.assertNotIn("carry", out)
+        self.assertEqual(self.remote_tags()["release-0.2.0"], self.first)
+
+    def test_a_live_run_is_not_carried(self):
+        self.run_tag()
+        self.write({"README.md": "later\n"})
+        later = self.commit("later")
+        live = {"status": "in_progress", "conclusion": "", "url": "u", "head_sha": self.first,
+                "publish_started": True}
+        waits, out = self.run_tag(commit=later, run=lambda tag: live)
+        self.assertIn("wait   core-v0.1.0: tagged at", out)
+        self.assertNotIn("carry", out)
+        self.assertIn("release-0.2.0", [w for w, _ in waits])
+        self.assertEqual({self.remote_tags()[t] for t in ("core-v0.1.0", "release-0.2.0")}, {self.first})
+
+    def test_a_later_commit_that_changes_a_package_is_not_carried_to(self):
+        self.run_tag()
+        self.published.add(("tool", "0.2.0"))
+        self.write({"crates/core/src/lib.rs": "pub fn core() { /* changed */ }\n"})
+        later = self.commit("change core without a bump")
+        with self.assertRaisesRegex(RuntimeError, "changes packages already tagged"):
+            self.run_tag(commit=later, run=lambda tag: self.stopped())
+
+    def test_the_gate_refuses_a_carry_from_a_commit_that_is_not_an_ancestor(self):
+        self.run_tag()
+        head = sh(self.work, "git", "rev-parse", "HEAD")
+        sh(self.work, "git", "checkout", "-q", "--orphan", "other")
+        self.write({"x.txt": "x"})
+        sh(self.work, "git", "add", "-A")
+        sh(self.work, "git", "commit", "-q", "-m", "unrelated")
+        stray = sh(self.work, "git", "rev-parse", "HEAD")
+        sh(self.work, "git", "checkout", "-q", "main")
+        sh(self.work, "git", "tag", "-d", "release-0.2.0")
+        sh(self.work, "git", "tag", "-a", "release-0.2.0", "-m",
+           f"Release 0.2.0\n\nRelease: 0.2.0\nCommit: {head}\nCarried-from: {stray}\n", head)
+        with self.assertRaisesRegex(RuntimeError, "not an ancestor"):
+            self.gate()
 
     def test_a_finished_release_is_left_alone(self):
         self.run_tag()
