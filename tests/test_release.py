@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 import unittest.mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -435,6 +436,22 @@ class Tagging(Repo):
         self.tag(commit=later, run=lambda tag: failed)
         tags = self.remote_tags()
         self.assertEqual({tags["core-v0.1.0"], tags["release-0.2.0"]}, {later})
+
+    def test_a_tagged_commit_that_fails_the_check_points_at_head(self):
+        first = sh(self.work, "git", "rev-parse", "HEAD")
+        self.tag()
+        self.write({"rab.yml": CONFIG + "# fixed on a later commit\n"})
+        later = self.commit("fix rab.yml")
+        real = release.check
+        broken = lambda read: [] if "# fixed" in read("rab.yml") else ["tool is listed before core"]
+        with mock.patch.object(release, "check", broken):
+            with self.assertRaisesRegex(RuntimeError, rf"(?s)at {first[:12]} disagrees.*"
+                                                      rf"release.py tag --commit {later[:12]}"):
+                self.tag()
+            with self.assertRaises(RuntimeError) as asked:
+                self.tag(commit=first)
+        self.assertNotIn("--commit", str(asked.exception), "not when the commit was asked for")
+        self.assertIs(release.check, real)
 
     def test_a_tag_elsewhere_with_the_same_files_is_waited_for(self):
         self.tag()
@@ -1645,6 +1662,18 @@ class OldNames(unittest.TestCase):
         newest = re.search(r"^### v(\d+\.\d+\.\d+)", changelog, re.M)[1]
         self.assertEqual(release.VERSION, newest)
         self.assertNotIn("### Unreleased", changelog.split(f"### v{newest}")[0])
+
+    def test_versions_have_no_gaps(self):
+        # Each version is the next patch, minor or major after the one below
+        # it (docs/changelog.md, "How rab is versioned"); checked from v2.0.0.
+        changelog = (KIT / "docs" / "changelog.md").read_text(encoding="utf-8")
+        versions = [tuple(map(int, v)) for v in re.findall(r"^### v(\d+)\.(\d+)\.(\d+)\s*$", changelog, re.M)]
+        versions = [v for v in versions if v >= (2, 0, 0)]
+        for newer, older in zip(versions, versions[1:]):
+            major, minor, patch = older
+            allowed = {(major, minor, patch + 1), (major, minor + 1, 0), (major + 1, 0, 0)}
+            self.assertIn(newer, allowed, f"v{'.'.join(map(str, newer))} does not follow "
+                                          f"v{'.'.join(map(str, older))}")
 
 
 class Migrate(unittest.TestCase):

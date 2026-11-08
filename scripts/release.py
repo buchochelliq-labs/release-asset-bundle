@@ -120,7 +120,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 CONFIG = "rab.yml"
 # release-kit 1.x's name for it: still read, with a warning, until rab 3.0.0.
 OLD_CONFIG = "release-kit.yml"
@@ -3059,7 +3059,16 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
         raise RuntimeError(f"{sha[:12]} is not on {remote}/{release.branch} as last fetched: release from the "
                            "default branch after the release PR merges (git fetch first)")
     if errors := check(read):
-        raise RuntimeError(f"{CONFIG} at {sha[:12]} disagrees with the repository:\n  " + "\n  ".join(errors))
+        message = f"{CONFIG} at {sha[:12]} disagrees with the repository:\n  " + "\n  ".join(errors)
+        head = git("rev-parse", "--verify", "HEAD^{commit}")
+        if not commit and head != sha and not subprocess.run(
+                ["git", "merge-base", "--is-ancestor", sha, head], cwd=root()).returncode:
+            # `tag` went back to where the release is tagged, whose files are
+            # older than HEAD's; a fix on a later commit is used only when asked.
+            message += (f"\nRelease {release.name} is tagged at {sha[:12]} ({why}), and those are its files. "
+                        f"If a later commit fixes this without changing what the packages ship, finish the "
+                        f"release from there: release.py tag --commit {head[:12]}")
+        raise RuntimeError(message)
     have_commits(existing, remote)
     if split := split_from(release, existing, sha, binds):
         raise RuntimeError(split_error(sha, split))
