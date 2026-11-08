@@ -120,7 +120,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-VERSION = "2.0.3"
+VERSION = "2.1.0"
 CONFIG = "rab.yml"
 # release-kit 1.x's name for it: still read, with a warning, until rab 3.0.0.
 OLD_CONFIG = "release-kit.yml"
@@ -1498,13 +1498,14 @@ def split_error(sha, split):
             + "\n".join(lines) + f"\nRelease from that commit ({hint}), or bump those packages first.")
 
 
-def tag_message(subject, release, sha):
-    return f"{subject}\n\nRelease: {release.name}\nCommit: {sha}\n"
+def tag_message(subject, release, sha, carried=None):
+    carry = f"Carried-from: {carried}\n" if carried else ""
+    return f"{subject}\n\nRelease: {release.name}\nCommit: {sha}\n{carry}"
 
 
 def trailers(tag_name):
     text = git("for-each-ref", f"refs/tags/{tag_name}", "--format=%(contents)")
-    return dict(re.findall(r"(?m)^(Release|Commit): (\S+)$", text))
+    return dict(re.findall(r"(?m)^(Release|Commit|Carried-from): (\S+)$", text))
 
 
 # ---------------------------------------------------------------------------
@@ -1540,6 +1541,13 @@ def gate(tag_name, remote="origin", status=published_on, output=None, verify_onl
                            "in its message (release.py tag writes them)")
     existing = remote_tags(remote)
     have_commits(existing, remote)
+    # A release carried from an older commit (`tag --commit`, after the run
+    # there stopped): its published packages keep their records there, and
+    # their channels are finished here. The split check below proves every
+    # package tagged there ships the same files here.
+    carried = recorded.get("Carried-from")
+    if carried and subprocess.run(["git", "merge-base", "--is-ancestor", carried, sha], cwd=root()).returncode:
+        raise RuntimeError(f"{tag_name} is carried from {carried[:12]}, which is not an ancestor of {sha[:12]}")
     unpublished = [p for p in release.packages if not status(p)]
     if foreign := not_its_own(release, existing, sha, remote, unpublished):
         raise RuntimeError(foreign_error(foreign, existing))
@@ -1555,7 +1563,7 @@ def gate(tag_name, remote="origin", status=published_on, output=None, verify_onl
             channels[package] = channels_of(package)
             continue
         pending, ended = {}, {}
-        if existing.get(package.tag) == sha:
+        if existing.get(package.tag) in (sha, carried or sha):
             pending = pending_channels(package, lambda p, c: channel_status(p, c, sha), ended)
         for channel, state in ended.items():
             print(f"{package}: {channel} is {TERMINAL[state]}; not selected for it", flush=True)
@@ -1569,7 +1577,8 @@ def gate(tag_name, remote="origin", status=published_on, output=None, verify_onl
     if not due:
         raise RuntimeError(f"{tag_name}: every package of release {release.name} is already published")
     untagged = [f"{p.tag} ({'missing' if p.tag not in existing else 'at ' + existing[p.tag][:12]})"
-                for p in due if existing.get(p.tag) != sha]
+                for p in due if existing.get(p.tag) != sha
+                and not (carried and existing.get(p.tag) == carried and status(p))]
     if untagged:
         raise RuntimeError(f"each selected package's tag must be on {sha[:12]}: {', '.join(untagged)}. "
                            "release.py tag pushes them.")
@@ -2995,6 +3004,20 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
         # published nothing; then the tag is moved.
         return status(package) or not dead(run(release_at(tagged, package).tag), tagged)
 
+    def carries(tagged, sha):
+        # Asked for by --commit only: a release whose run at `tagged` stopped
+        # (ended without success, so nothing is uploading) is finished from
+        # `sha`, a later commit. The split check has proved that every package
+        # tagged there ships the same files here; its published packages keep
+        # their records there, the rest are tagged here.
+        if not commit or tagged == sha:
+            return False
+        latest = run(release_at(tagged).tag)
+        stopped = bool(latest and latest["head_sha"] == tagged and latest["status"] == "completed"
+                       and latest["conclusion"] != "success")
+        return stopped and not subprocess.run(["git", "merge-base", "--is-ancestor", tagged, sha],
+                                              cwd=root()).returncode
+
     here = load(files_on_disk())
     unpublished = [p for p in here.packages if not status(p)]
     if foreign := not_its_own(here, existing, None, remote, unpublished):
@@ -3027,13 +3050,17 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
         raise RuntimeError(split_error(sha, split))
     print(f"Release {release.name} from {sha} ({why})", flush=True)
 
-    deletions, records, due, channels = [], [], [], {}
+    deletions, records, due, channels, carried = [], [], [], {}, None
     for package in release.packages:
         if status(package):
             # Its upload is done; the channels made from it may not be. They
-            # are finished from the commit it was released from.
+            # are finished from the commit it was released from, or from a
+            # later one the release is carried to.
             pending, ended = {}, {}
-            if existing.get(package.tag) == sha:
+            tagged = existing.get(package.tag)
+            if tagged and (tagged == sha or carries(tagged, sha)):
+                if tagged != sha:
+                    carried = tagged
                 pending = pending_channels(package, lambda p, c: channel_status(p, c, sha), ended)
             for channel, state in ended.items():
                 print(f"note   {channel} of {package} is {TERMINAL[state]}; not retried", flush=True)
@@ -3047,7 +3074,12 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
             continue
         tagged = existing.get(package.tag)
         if tagged and tagged != sha:
-            if binds(package, tagged):
+            if binds(package, tagged) and carries(tagged, sha):
+                print(f"carry  {package.tag}: the release run at {tagged[:12]} stopped before publishing it; "
+                      f"{sha[:12]} ships the same files", flush=True)
+                deletions.append(package.tag)
+                tagged, carried = None, tagged
+            elif binds(package, tagged):
                 # Tagged elsewhere, shipping the same files (the split check
                 # passed), and its run there may publish it: wait for that run.
                 print(f"wait   {package.tag}: tagged at {tagged[:12]}, which ships the same files; "
@@ -3055,9 +3087,10 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
                 if not dry_run:
                     wait(release_at(tagged, package).tag, [package], timeout, status)
                 continue
-            print(f"move   {package.tag}: the release run at {tagged[:12]} published nothing", flush=True)
-            deletions.append(package.tag)
-            tagged = None
+            else:
+                print(f"move   {package.tag}: the release run at {tagged[:12]} published nothing", flush=True)
+                deletions.append(package.tag)
+                tagged = None
         if tagged:
             print(f"keep   {package.tag}: already tagged here", flush=True)
         else:
@@ -3073,11 +3106,16 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
     tagged = existing.get(release.tag)
     latest = run(release.tag) if tagged else None
     if tagged and tagged != sha:
-        if not dead(latest, tagged):
+        if dead(latest, tagged):
+            print(f"move   {release.tag}: its run at {tagged[:12]} ended {latest['conclusion']} before publishing",
+                  flush=True)
+        elif carries(tagged, sha):
+            print(f"carry  {release.tag}: its run at {tagged[:12]} ended {latest['conclusion']}; the release is "
+                  f"finished from {sha[:12]}", flush=True)
+            carried = tagged
+        else:
             raise RuntimeError(f"{release.tag} is on {tagged[:12]}, not {sha[:12]}, and its run there may have "
                                f"published: release from that commit (--commit {tagged[:12]}) or wait for it")
-        print(f"move   {release.tag}: its run at {tagged[:12]} ended {latest['conclusion']} before publishing",
-              flush=True)
         deletions.append(release.tag)
         tagged = None
     elif tagged and latest and latest["status"] == "completed" and (
@@ -3093,7 +3131,7 @@ def tag(commit=None, remote="origin", timeout=10800, dry_run=False, wanted=None,
     else:
         subjects = "".join(f"{p}\n" if channels[p] == channels_of(p) else f"{p}: {', '.join(channels[p])}\n"
                            for p in due)
-        start = (release.tag, tag_message(f"Release {release.name}\n\n{subjects}".rstrip(), release, sha))
+        start = (release.tag, tag_message(f"Release {release.name}\n\n{subjects}".rstrip(), release, sha, carried))
         print(f"tag    {release.tag} at {sha[:12]} (starts the release run: "
               + ", ".join(p.name if channels[p] == channels_of(p) else f"{p.name} ({', '.join(channels[p])})"
                           for p in due) + ")", flush=True)

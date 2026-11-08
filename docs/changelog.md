@@ -37,7 +37,20 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ## Changelog
 
-### v2.0.3
+### v2.1.0
+
+**Added: carry a stopped release to a later commit.** A re-run of a release
+that published part of itself ran on the tagged commit, with that commit's
+kit and `rab.yml`, so a bug in the release tooling failed the same way every
+time. open-data-suite's v0.1.3 published its GitHub release and four crates,
+then stopped on three tooling bugs fixed only on later commits. Now
+`tag --commit <sha>` carries such a release once its run has ended: published
+packages keep their records and their Homebrew and Chocolatey channels are
+finished from `<sha>`; unpublished packages are tagged there. It applies only
+when `<sha>` descends from the tagged commit and ships the same files for every
+package (the split check), and never while the run is live. The release tag
+records `Carried-from:`, and the gate checks it. See
+[recovery](recovery.md#case-2-the-run-published-part-of-the-release).
 
 **Fixed: `check` missed a crate listed before one it dev-depends on.** Cargo
 keeps a dev-dependency that has a `version` (directly or through

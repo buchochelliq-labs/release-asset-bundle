@@ -2046,6 +2046,77 @@ class FinishChannels(Repo):
         message = sh(self.work, "git", "for-each-ref", "refs/tags/release-0.2.0", "--format=%(contents)")
         self.assertIn("tool 0.2.0 (github): homebrew, chocolatey", message)
 
+    def stopped(self):
+        return {"status": "completed", "conclusion": "failure", "url": "u", "head_sha": self.first,
+                "publish_started": True}
+
+    def test_a_stopped_release_is_carried_to_a_later_commit_that_ships_the_same_files(self):
+        # As open-data-suite 0.1.3: the GitHub release went out, then the run
+        # failed before core; the fix is in the release tooling on a later commit.
+        self.run_tag()
+        self.published.add(("tool", "0.2.0"))
+        self.write({"README.md": "a fix outside every package\n"})
+        later = self.commit("fix the release tooling")
+        self.states = {"homebrew": "proposed", "chocolatey": "due"}
+        waits, out = self.run_tag(commit=later, run=lambda tag: self.stopped())
+        self.assertIn("carry  core-v0.1.0: the release run at", out)
+        self.assertIn("carry  release-0.2.0: its run at", out)
+        self.assertIn("finish tool-v0.2.0: tool 0.2.0 (github) is published; chocolatey is due", out)
+        tags = self.remote_tags()
+        self.assertEqual((tags["core-v0.1.0"], tags["release-0.2.0"]), (later, later))
+        self.assertEqual(tags["tool-v0.2.0"], self.first, "a published package keeps its record")
+        self.assertEqual(release.trailers("release-0.2.0"),
+                         {"Release": "0.2.0", "Commit": later, "Carried-from": self.first})
+        self.assertEqual(waits, [("release-0.2.0", [("tool", "chocolatey")])])
+        selection = json.loads(self.gate()["selection"])
+        self.assertEqual([(s["name"], s["channels"]) for s in selection],
+                         [("core", ["crates.io"]), ("tool", ["chocolatey"])])
+
+    def test_a_release_is_carried_only_when_asked(self):
+        self.run_tag()
+        self.published.add(("tool", "0.2.0"))
+        self.write({"README.md": "later\n"})
+        self.commit("later")
+        waits, out = self.run_tag(run=lambda tag: self.stopped())
+        self.assertIn("release 0.2.0 is already tagged there", out)
+        self.assertNotIn("carry", out)
+        self.assertEqual(self.remote_tags()["release-0.2.0"], self.first)
+
+    def test_a_live_run_is_not_carried(self):
+        self.run_tag()
+        self.write({"README.md": "later\n"})
+        later = self.commit("later")
+        live = {"status": "in_progress", "conclusion": "", "url": "u", "head_sha": self.first,
+                "publish_started": True}
+        waits, out = self.run_tag(commit=later, run=lambda tag: live)
+        self.assertIn("wait   core-v0.1.0: tagged at", out)
+        self.assertNotIn("carry", out)
+        self.assertIn("release-0.2.0", [w for w, _ in waits])
+        self.assertEqual({self.remote_tags()[t] for t in ("core-v0.1.0", "release-0.2.0")}, {self.first})
+
+    def test_a_later_commit_that_changes_a_package_is_not_carried_to(self):
+        self.run_tag()
+        self.published.add(("tool", "0.2.0"))
+        self.write({"crates/core/src/lib.rs": "pub fn core() { /* changed */ }\n"})
+        later = self.commit("change core without a bump")
+        with self.assertRaisesRegex(RuntimeError, "changes packages already tagged"):
+            self.run_tag(commit=later, run=lambda tag: self.stopped())
+
+    def test_the_gate_refuses_a_carry_from_a_commit_that_is_not_an_ancestor(self):
+        self.run_tag()
+        head = sh(self.work, "git", "rev-parse", "HEAD")
+        sh(self.work, "git", "checkout", "-q", "--orphan", "other")
+        self.write({"x.txt": "x"})
+        sh(self.work, "git", "add", "-A")
+        sh(self.work, "git", "commit", "-q", "-m", "unrelated")
+        stray = sh(self.work, "git", "rev-parse", "HEAD")
+        sh(self.work, "git", "checkout", "-q", "main")
+        sh(self.work, "git", "tag", "-d", "release-0.2.0")
+        sh(self.work, "git", "tag", "-a", "release-0.2.0", "-m",
+           f"Release 0.2.0\n\nRelease: 0.2.0\nCommit: {head}\nCarried-from: {stray}\n", head)
+        with self.assertRaisesRegex(RuntimeError, "not an ancestor"):
+            self.gate()
+
     def test_a_finished_release_is_left_alone(self):
         self.run_tag()
         self.publish_all()
