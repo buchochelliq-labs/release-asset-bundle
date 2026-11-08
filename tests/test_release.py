@@ -1661,7 +1661,8 @@ class OldNames(unittest.TestCase):
         changelog = (KIT / "docs" / "changelog.md").read_text(encoding="utf-8")
         newest = re.search(r"^### v(\d+\.\d+\.\d+)", changelog, re.M)[1]
         self.assertEqual(release.VERSION, newest)
-        self.assertNotIn("### Unreleased", changelog.split(f"### v{newest}")[0])
+        # Changes since the last release collect under one Unreleased heading, above it.
+        self.assertLessEqual(changelog.split(f"### v{newest}")[0].count("### Unreleased"), 1)
 
     def test_versions_have_no_gaps(self):
         # Each version is the next patch, minor or major after the one below

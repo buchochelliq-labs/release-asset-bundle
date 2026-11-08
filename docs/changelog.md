@@ -12,9 +12,10 @@ rab (release-kit until 1.7.0) is tagged `vX.Y.Z`:
 
 **Versions have no gaps.** Each version is the next patch, minor or major after
 the one before it (`v2.0.2` → `v2.0.3`, `v2.1.0` or `v3.0.0`), and every
-version in this changelog is tagged. A fix to a version that is merged but not
-yet tagged goes into that version (its `VERSION` and changelog entry), not a
-new one. A test checks this from v2.0.0 on.
+version in this changelog is tagged. Changes merged after a release collect
+under **Unreleased**, and `VERSION` stays at the last release; the maintainer
+decides when they ship and with which number, the next one. A test checks this
+from v2.0.0 on.
 
 `release.py --version` prints the version of the script (`rab 2.0.0`). An
 installed copy records where it came from in `.github/rab/manifest.json`:
@@ -43,7 +44,7 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ## Changelog
 
-### v2.1.1
+### Unreleased
 
 **Fixed: `tag` did not say how to finish a release whose tagged files fail
 `check`.** Without `--commit`, `tag` goes back to the commit a release is
