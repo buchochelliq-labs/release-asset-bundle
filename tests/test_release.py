@@ -120,6 +120,29 @@ packages:
             "core.workspace = true", 'core = { path = "../core", version = "0.1" }')
         self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
 
+    def test_inherited_dev_dependencies_come_from_the_crates_own_workspace(self):
+        workspace = ('[workspace]\nmembers = ["*"]\n[workspace.package]\nversion = "0.1.0"\n'
+                     '[workspace.dependencies]\ncore = { path = "core", version = "0.1.0" }\n')
+        tool = ('[package]\nname = "tool"\nversion = "0.2.0"\n'
+                '[dev-dependencies]\ncore.workspace = true\n')
+        config = CONFIG.replace("crates/", "rust/")
+        head, core, tool_entry = config.split("  - name: ")
+        swapped = head + "  - name: " + tool_entry.rstrip() + "\n  - name: " + core
+        # A workspace below the repository root, and no Cargo.toml at the root.
+        files = {"rust/Cargo.toml": workspace, "rust/core/Cargo.toml": FILES["crates/core/Cargo.toml"],
+                 "rust/tool/Cargo.toml": tool, "rab.yml": config}
+        self.assertEqual(release.check(reader(files)), [])
+        files["rab.yml"] = swapped
+        self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
+        # A root Cargo.toml of another workspace doesn't hide the crate's own.
+        files["Cargo.toml"] = '[workspace]\nmembers = ["other"]\n'
+        self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
+        # `package.workspace` names the root explicitly.
+        files["ws/Cargo.toml"] = workspace.replace('path = "core"', 'path = "../rust/core"')
+        files["rust/Cargo.toml"] = '[workspace]\nmembers = []\n'
+        files["rust/tool/Cargo.toml"] = tool.replace('version = "0.2.0"\n', 'version = "0.2.0"\nworkspace = "../../ws"\n', 1)
+        self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
+
     def test_record_tags_are_distinct_from_each_other_and_the_release_tag(self):
         files = dict(FILES)
         files["rab.yml"] = CONFIG.replace('version: "0.2.0"\n', 'version: "0.2.0"\n    tag: "release-{version}"\n')

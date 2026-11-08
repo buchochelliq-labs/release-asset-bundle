@@ -364,13 +364,37 @@ def version_key(version):
 
 # Manifests: how each registry's manifest names its package and version.
 
+def _cargo_workspace(read, path, data):
+    """The `[workspace]` table a crate inherits from, as cargo finds it: the
+    root `package.workspace` names, else the nearest Cargo.toml at or above the
+    crate's that has one. {} if there is none."""
+    if "workspace" in data:
+        return data["workspace"]
+    crate = PurePosixPath(path).parent
+    named = data.get("package", {}).get("workspace")
+    if named:
+        candidates = [PurePosixPath(posixpath.normpath(str(crate / named / "Cargo.toml")))]
+    else:
+        candidates = [parent / "Cargo.toml" for parent in crate.parents]
+    for candidate in candidates:
+        name = str(candidate).removeprefix("./")
+        try:
+            manifest = tomllib.loads(read(name))
+        except (FileNotFoundError, subprocess.CalledProcessError):
+            continue
+        if "workspace" in manifest:
+            return manifest["workspace"]
+    return {}
+
+
 def _cargo(read, path):
     data = tomllib.loads(read(path))
     package = data.get("package", {})
     version = package.get("version")
+    workspace = None
     if isinstance(version, dict) and version.get("workspace"):
-        workspace = tomllib.loads(read("Cargo.toml"))
-        version = workspace["workspace"]["package"]["version"]
+        workspace = _cargo_workspace(read, path, data)
+        version = workspace["package"]["version"]
     deps = set()
     tables = [data.get("dependencies", {}), data.get("build-dependencies", {})]
     tables += [t.get("dependencies", {}) for t in data.get("target", {}).values()]
@@ -381,13 +405,12 @@ def _cargo(read, path):
     # manifest (it strips only path-only ones), so crates.io must have it first.
     dev = [data.get("dev-dependencies", {})]
     dev += [t.get("dev-dependencies", {}) for t in data.get("target", {}).values()]
-    inherited = None
     for table in dev:
         for key, spec in table.items():
             if isinstance(spec, dict) and spec.get("workspace"):
-                if inherited is None:
-                    inherited = tomllib.loads(read("Cargo.toml")).get("workspace", {}).get("dependencies", {})
-                base = inherited.get(key, {})
+                if workspace is None:
+                    workspace = _cargo_workspace(read, path, data)
+                base = workspace.get("dependencies", {}).get(key, {})
                 versioned = isinstance(base, str) or (isinstance(base, dict) and "version" in base)
                 name = base.get("package", key) if isinstance(base, dict) else key
             else:
