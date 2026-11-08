@@ -1755,6 +1755,45 @@ class HomebrewState(unittest.TestCase):
         self.assertEqual(self.state({}, package), ("prerelease", []))
 
 
+class ChocolateyStepOnWindows(unittest.TestCase):
+    """publish-chocolatey's bash step reads jq's output; on Windows jq ends lines with
+    CRLF, and a \r left in a field broke the v0.1.3 release of open-data-suite."""
+
+    def test_no_carriage_return_reaches_a_path_or_a_field(self):
+        import shutil
+        import yaml
+        real_jq = shutil.which("jq")
+        if not real_jq:
+            self.skipTest("jq is not installed")
+        step = next(st for st in yaml.safe_load(
+            (Path(__file__).resolve().parent.parent / "publish-chocolatey" / "action.yml").read_text()
+        )["runs"]["steps"] if st.get("shell") == "bash")
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            stubs = d / "stubs"
+            stubs.mkdir()
+            # jq as on Windows: every line ends with CRLF.
+            (stubs / "jq").write_text(f'#!/bin/sh\n"{real_jq}" "$@" | sed "s/$/\\r/"\n')
+            # The kit's script: CRLF too (Python's print on Windows).
+            (stubs / "python3").write_text(
+                '#!/bin/sh\ncase "$2" in github-release) printf \'{"chocolatey": {"package": "p", '
+                '"test": "ods version"}}\\r\\n\' ;; esac\n')
+            (stubs / "gh").write_text(
+                '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = --dir ] && dir=$2; shift; done\n'
+                'mkdir -p "$dir" && echo "aa  ods.zip" > "$dir/ods.zip.sha256"\n')
+            for stub in stubs.iterdir():
+                stub.chmod(0o755)
+            selection = json.dumps([{"name": "ods", "registry": "github", "version": "0.1.3",
+                                     "tag": "v0.1.3", "slug": "ods", "channels": ["chocolatey"]}])
+            env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "RUNNER_TEMP": str(d),
+                   "GITHUB_ACTION_PATH": str(d / "action"), "SELECTION": selection}
+            subprocess.run(["bash", "-c", step["run"]], env=env, check=True)
+            root = d / "chocolatey"
+            self.assertEqual(sorted(p.name for p in root.iterdir() if p.is_dir()), ["ods"])
+            self.assertTrue((root / "ods" / "SHA256SUMS").is_file())
+            self.assertEqual((root / "packages").read_bytes(), b"ods\t0.1.3\tods\tods version\n")
+
+
 class ChocolateyState(unittest.TestCase):
     URL = "https://community.chocolatey.org/api/v2/Packages(Id='onto-cli',Version='1.2.0')"
     package = release.Package("tool", "github", "Cargo.toml", "1.2.0", "v{version}")
