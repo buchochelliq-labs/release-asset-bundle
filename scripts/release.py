@@ -120,7 +120,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-VERSION = "2.0.2"
+VERSION = "2.0.3"
 CONFIG = "rab.yml"
 # release-kit 1.x's name for it: still read, with a warning, until rab 3.0.0.
 OLD_CONFIG = "release-kit.yml"
@@ -377,6 +377,24 @@ def _cargo(read, path):
     for table in tables:
         for key, spec in table.items():
             deps.add(spec.get("package", key) if isinstance(spec, dict) else key)
+    # Cargo keeps a dev-dependency that has a version in the published
+    # manifest (it strips only path-only ones), so crates.io must have it first.
+    dev = [data.get("dev-dependencies", {})]
+    dev += [t.get("dev-dependencies", {}) for t in data.get("target", {}).values()]
+    inherited = None
+    for table in dev:
+        for key, spec in table.items():
+            if isinstance(spec, dict) and spec.get("workspace"):
+                if inherited is None:
+                    inherited = tomllib.loads(read("Cargo.toml")).get("workspace", {}).get("dependencies", {})
+                base = inherited.get(key, {})
+                versioned = isinstance(base, str) or (isinstance(base, dict) and "version" in base)
+                name = base.get("package", key) if isinstance(base, dict) else key
+            else:
+                versioned = isinstance(spec, str) or (isinstance(spec, dict) and "version" in spec)
+                name = spec.get("package", key) if isinstance(spec, dict) else key
+            if versioned:
+                deps.add(name)
     return package.get("name"), version, deps
 
 

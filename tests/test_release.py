@@ -105,6 +105,21 @@ packages:
         files["rab.yml"] = head + "  - name: " + tool.rstrip() + "\n  - name: " + core
         self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
 
+    def test_a_versioned_dev_dependency_counts_for_the_order(self):
+        # cargo keeps it in the published manifest, so crates.io needs it first
+        files = dict(FILES)
+        files["Cargo.toml"] += '[workspace.dependencies]\ncore = { path = "crates/core", version = "0.1.0" }\n'
+        files["crates/core/Cargo.toml"] += '[dev-dependencies]\ntool.path = "../tool"\n'
+        files["crates/tool/Cargo.toml"] = ('[package]\nname = "tool"\nversion = "0.2.0"\n'
+                                           '[dev-dependencies]\ncore.workspace = true\n')
+        self.assertEqual(release.check(reader(files)), [], "a path-only dev-dependency is stripped")
+        head, core, tool = CONFIG.split("  - name: ")
+        files["rab.yml"] = head + "  - name: " + tool.rstrip() + "\n  - name: " + core
+        self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
+        files["crates/tool/Cargo.toml"] = files["crates/tool/Cargo.toml"].replace(
+            "core.workspace = true", 'core = { path = "../core", version = "0.1" }')
+        self.assertIn("tool is listed before core, which it depends on", release.check(reader(files)))
+
     def test_record_tags_are_distinct_from_each_other_and_the_release_tag(self):
         files = dict(FILES)
         files["rab.yml"] = CONFIG.replace('version: "0.2.0"\n', 'version: "0.2.0"\n    tag: "release-{version}"\n')

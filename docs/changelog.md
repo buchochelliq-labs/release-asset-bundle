@@ -37,6 +37,19 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ## Changelog
 
+### v2.0.3
+
+**Fixed: `check` missed a crate listed before one it dev-depends on.** Cargo
+keeps a dev-dependency that has a `version` (directly or through
+`workspace = true`) in the published manifest, so crates.io must already have
+it. `check` counted only normal and build dependencies, and the combined
+`cargo publish --dry-run` uses a local registry holding every crate, so
+open-data-suite's v0.1.3 release passed both, then stopped after four crates:
+`ods-health` dev-depends on `ods-provider-fake`, which `rab.yml` listed later.
+`check` now counts `[dev-dependencies]` (and `[target.*.dev-dependencies]`)
+that carry a version; a path-only one is stripped by cargo and still does not
+count.
+
 ### v2.0.2
 
 **Fixed: `publish-chocolatey` failed on Windows before packing.** Its bash
