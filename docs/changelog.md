@@ -37,7 +37,7 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ## Changelog
 
-### Unreleased
+### v2.0.2
 
 **Fixed: `publish-chocolatey` failed on Windows before packing.** Its bash
 step read `jq`'s output, and on Windows `jq` ends each line with CRLF; bash
