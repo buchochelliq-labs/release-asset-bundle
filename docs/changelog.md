@@ -43,6 +43,17 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ## Changelog
 
+### v2.1.2
+
+**Fixed: `check` on Windows refused every crate's embeds.** `cargo package
+--list` prints paths with backslashes there (`src\figlet.rs`), and the embed
+check read them as POSIX paths, so an embed beside its source
+(`include_str!("../fonts/standard.flf")`) looked outside the crate, a
+packaged file (`assets/cat.gif`) looked missing, and `examples\` sources
+were scanned though `cargo publish` does not build them. The list is now
+read with either separator, one path a line. Found running rs-rich-cli's
+0.0.26 `check` on Windows; Linux and macOS were not affected.
+
 ### v2.1.1
 
 **Fixed: the release record gave a crate the files of a same-named
