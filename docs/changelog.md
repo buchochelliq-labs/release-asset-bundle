@@ -43,6 +43,15 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ## Changelog
 
+### v2.1.1
+
+**Fixed: the release record gave a crate the files of a same-named
+package.** Build artifacts are named `release--<slug>--<job>`, without the
+registry, so in rs-rich-cli's 0.0.25 record the crates.io `rs-rich` listed
+the PyPI `rs-rich` wheels. A package with no `artifacts` builds nothing, so
+its record now lists no files. Two packages of one name that both build
+artifacts still share a slug; give one of them a different name.
+
 ### v2.1.0
 
 **Fixed: `tag` could not finish a release whose tagged files fail `check`.**

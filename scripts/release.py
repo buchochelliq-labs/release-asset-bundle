@@ -120,7 +120,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-VERSION = "2.1.0"
+VERSION = "2.1.1"
 CONFIG = "rab.yml"
 # release-kit 1.x's name for it: still read, with a warning, until rab 3.0.0.
 OLD_CONFIG = "release-kit.yml"
@@ -2253,7 +2253,9 @@ def record(tag_name, sha, selection, verify_only, needs, dist="dist", read=None,
                     there = None
                 outcome = ("unknown" if there is None else on_registry if there
                            else "skipped" if job == "skipped" else "failed")
-            files = built_files(dist, package.slug)
+            # Build artifacts are named by slug, not registry: a package that
+            # builds nothing (a crate) must not take a same-named one's files.
+            files = built_files(dist, package.slug) if package.artifacts else []
         if selected:
             # Done: its own upload (when due) and, outside a verify-only run
             # (which runs no channel job), every channel due for it.
