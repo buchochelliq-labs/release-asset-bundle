@@ -10,6 +10,12 @@ rab (release-kit until 1.7.0) is tagged `vX.Y.Z`:
 - a **major** (`v3.0.0`) needs repositories to change their configuration or
   workflow. Each repository moves when it installs the new version.
 
+**Versions have no gaps.** Each version is the next patch, minor or major after
+the one before it (`v2.0.2` → `v2.0.3`, `v2.1.0` or `v3.0.0`), and every
+version in this changelog is tagged. A fix to a version that is merged but not
+yet tagged goes into that version (its `VERSION` and changelog entry), not a
+new one. A test checks this from v2.0.0 on.
+
 `release.py --version` prints the version of the script (`rab 2.0.0`). An
 installed copy records where it came from in `.github/rab/manifest.json`:
 
@@ -37,7 +43,7 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ## Changelog
 
-### Unreleased
+### v2.1.1
 
 **Fixed: the release record gave a crate the files of a same-named
 package.** Build artifacts are named `release--<slug>--<job>`, without the
@@ -45,6 +51,56 @@ registry, so in rs-rich-cli's 0.0.25 record the crates.io `rs-rich` listed
 the PyPI `rs-rich` wheels. A package with no `artifacts` builds nothing, so
 its record now lists no files. Two packages of one name that both build
 artifacts still share a slug; give one of them a different name.
+
+### v2.1.0
+
+**Fixed: `tag` could not finish a release whose tagged files fail `check`.**
+Without `--commit`, `tag` goes back to the commit a release is tagged at and
+checks that commit's `rab.yml`. When a later commit has the fix
+(open-data-suite's 0.1.3, tagged before its crate order was fixed), `tag`
+failed with only the old commit's errors. Now, when `HEAD` is on the default
+branch, descends from the tagged commit, names the same release and passes
+`check`, `tag` finishes the release from `HEAD` (as `--commit HEAD` would:
+only while the run at the tagged commit has stopped, and only when every
+package ships the same files). Otherwise the error names the command:
+`release.py tag --commit <HEAD>`.
+
+**Added: carry a stopped release to a later commit.** A re-run of a release
+that published part of itself ran on the tagged commit, with that commit's
+kit and `rab.yml`, so a bug in the release tooling failed the same way every
+time. open-data-suite's v0.1.3 published its GitHub release and four crates,
+then stopped on three tooling bugs fixed only on later commits. Now
+`tag --commit <sha>` carries such a release once its run has ended: published
+packages keep their records and their Homebrew and Chocolatey channels are
+finished from `<sha>`; unpublished packages are tagged there. It applies only
+when `<sha>` descends from the tagged commit and ships the same files for every
+package (the split check), and never while the run is live. The release tag
+records `Carried-from:`, and the gate checks it. If the carried run fails too
+(a channel, say), `tag` again, with or without `--commit`, finishes the
+release from the commit it was carried to. See
+[recovery](recovery.md#case-2-the-run-published-part-of-the-release).
+
+**Fixed: `check` missed a crate listed before one it dev-depends on.** Cargo
+keeps a dev-dependency that has a `version` (directly or through
+`workspace = true`) in the published manifest, so crates.io must already have
+it. `check` counted only normal and build dependencies, and the combined
+`cargo publish --dry-run` uses a local registry holding every crate, so
+open-data-suite's v0.1.3 release passed both, then stopped after four crates:
+`ods-health` dev-depends on `ods-provider-fake`, which `rab.yml` listed later.
+`check` now counts `[dev-dependencies]` (and `[target.*.dev-dependencies]`)
+that carry a version; a path-only one is stripped by cargo and still does not
+count.
+
+### v2.0.2
+
+**Fixed: `publish-chocolatey` failed on Windows before packing.** Its bash
+step read `jq`'s output, and on Windows `jq` ends each line with CRLF; bash
+kept the `\r`, so open-data-suite's v0.1.3 release read the package slug as
+`ods\r` and `gh release download` could not create the directory
+(`The filename, directory name, or volume label syntax is incorrect`).
+The step now strips carriage returns from everything `jq` prints, which also
+keeps them out of the package's `test` command. A test runs the step under bash
+with a `jq` that writes CRLF.
 
 ### v2.0.1
 

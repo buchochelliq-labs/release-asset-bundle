@@ -99,7 +99,11 @@ Tags the release and waits for its run to publish it.
 
 **Which commit.** In order:
 
-1. `--commit`, if given.
+1. `--commit`, if given. A release tagged on an earlier commit whose run has
+   ended is carried here when this commit ships the same files
+   (`carry` below). Without `--commit`, when the commit chosen below fails
+   `check` and `HEAD` (on the default branch, the same release) passes it,
+   `HEAD` is used the same way, with a `note`.
 2. Otherwise, a release that is already tagged and not finished: the one named
    by `--release`, or else the newest tagged release (by version) if it
    still has a due package, or a published `github` package whose Homebrew
@@ -127,6 +131,7 @@ be split (rule 4).
 | `keep   <tag>` | the record tag is already on this commit |
 | `tag    <tag>` | a new record tag on this commit |
 | `move   <tag>` | the record tag is on another commit whose run published nothing; it is moved here |
+| `carry  <tag>` | with `--commit`: the record tag is on an earlier commit that ships the same files, and its run there ended without publishing this package; it is moved here ([recovery](recovery.md#case-2-the-run-published-part-of-the-release)) |
 | `wait   <tag>` | the record tag is on another commit that ships the same files, and that commit's run may still publish it; `tag` waits for that run |
 
 Then the release tag:
@@ -135,6 +140,7 @@ Then the release tag:
 |---|---|
 | `tag    release-X` | a new release tag, which starts the run |
 | `move   release-X` | it was on another commit whose run ended before publishing; it is moved here |
+| `carry  release-X` | with `--commit`: it was on an earlier commit whose run ended without success after publishing part of the release; it is moved here, with a `Carried-from:` trailer |
 | `retag  release-X` | it is on this commit but its run failed (or succeeded with only channels left to finish); it is pushed again, starting a new run that publishes only what is still due |
 | `wait   release-X` | it is on this commit and its run is live (or succeeded); `tag` only waits |
 

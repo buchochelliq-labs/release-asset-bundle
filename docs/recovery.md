@@ -72,6 +72,31 @@ retag  release-0.2.0: its run ended failure; the new run publishes only what is 
 
 The new run's gate selects only `onto-cli`.
 
+If the fix is in the release tooling itself (the installed kit, `rab.yml`,
+the workflow), a re-run on the tagged commit fails the same way, because it
+runs that commit's files. When the fix changes no file a package ships, carry
+the release to the commit with the fix: once the run on the tagged commit has
+ended, run `tag --commit <sha>` (for example `--commit origin/main` after
+`git fetch`):
+
+```text
+Release 0.2.0 from 7c1d... (--commit)
+skip   onto-v0.2.0: onto 0.2.0 (crates.io) is already published
+carry  onto-cli-v0.2.0: the release run at 3e9a0b1c2d4f stopped before publishing it; 7c1d2e3f4a5b ships the same files
+tag    onto-cli-v0.2.0 at 7c1d2e3f4a5b (a record)
+carry  release-0.2.0: its run at 3e9a0b1c2d4f ended failure; the release is finished from 7c1d2e3f4a5b
+```
+
+Published packages keep their record tags where they were published, and the
+channels made from them (Homebrew, Chocolatey) are finished from the new
+commit. Packages not yet published are tagged there. The release tag records
+`Carried-from: <old commit>`, and the gate checks it again: that commit must be
+an ancestor, and no package tagged there may ship different files. `tag`
+carries only when you ask with `--commit`, or when the tagged commit's
+`rab.yml` fails `check` and `HEAD` fixes it, and never while that run is live.
+If the carried run fails too (a channel, say), run `tag` again: the
+`Carried-from:` trailer keeps the release on the new commit.
+
 If the fix must change files that the tagged commit ships, the release cannot
 move there: that would split it (rule 4). Bump the versions of the packages
 that are still due, merge, and release the new versions.

@@ -40,7 +40,9 @@ from the manifests:
 
 - `Cargo.toml`: `[dependencies]`, `[build-dependencies]` and
   `[target.*.dependencies]` (a renamed dependency counts by its `package =`
-  name). `[dev-dependencies]` do not count.
+  name), plus `[dev-dependencies]` that have a `version` (directly or through
+  `workspace = true`): cargo keeps those in the published manifest, so
+  crates.io needs them first. A path-only dev-dependency does not count.
 - `pyproject.toml`: `[project] dependencies` (or Poetry's).
 - `package.json`: `dependencies` and `peerDependencies`.
 
