@@ -120,7 +120,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-VERSION = "2.1.1"
+VERSION = "2.1.2"
 CONFIG = "rab.yml"
 # release-kit 1.x's name for it: still read, with a warning, until rab 3.0.0.
 OLD_CONFIG = "release-kit.yml"
@@ -2514,7 +2514,10 @@ def without_tests(source):
 def embed_problems(name, crate_dir, packaged):
     """Files the crate's sources embed (include_str!, include_bytes!,
     include!) that its package does not carry: a package holds only its
-    crate directory, so an embed from elsewhere fails `cargo publish`."""
+    crate directory, so an embed from elsewhere fails `cargo publish`.
+    `cargo package --list` prints paths with the platform's separator
+    (`src\\main.rs` on Windows); they are compared as POSIX paths."""
+    packaged = [file.replace("\\", "/") for file in packaged]
     problems, carried = [], set(packaged)
     for file in sorted(packaged):
         if not file.endswith(".rs") or file.startswith(NOT_BUILT):
@@ -2693,7 +2696,7 @@ def crates_io_readiness(release, base, only=None, fetch=None, cargo=None, repo=N
             if not problems:   # else most likely one of them
                 problems.append(f"{package.name}: `cargo package --list` fails: {cargo_failure(result)}")
         else:
-            problems.extend(embed_problems(package.name, crate_dir, result.stdout.split()))
+            problems.extend(embed_problems(package.name, crate_dir, result.stdout.splitlines()))
         errors.extend(problems)
     if only is None:
         declared = declared_crates(release, base, found)

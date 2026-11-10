@@ -2486,6 +2486,23 @@ class CratesIoReadinessParts(unittest.TestCase):
                   'const B: &[u8] = include_bytes!("b.bin");\n')
         self.assertEqual(release.EMBED.findall(release.without_tests(source)), [("", "a.txt"), ("", "b.bin")])
 
+    def test_windows_package_lists_are_read_as_posix_paths(self):
+        # `cargo package --list` on Windows prints `src\\figlet.rs`: an embed
+        # beside the source, or one the package carries, is not refused.
+        with tempfile.TemporaryDirectory() as tmp:
+            crate = Path(tmp)
+            (crate / "src").mkdir()
+            (crate / "fonts").mkdir()
+            (crate / "assets").mkdir()
+            (crate / "src/figlet.rs").write_text('const F: &str = include_str!("../fonts/standard.flf");\n')
+            (crate / "src/lib.rs").write_text('const A: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), '
+                                              '"/assets/cat.gif"));\n'
+                                              'const B: &str = include_str!("../../outside.txt");\n')
+            packaged = ["Cargo.toml", "src\\figlet.rs", "src\\lib.rs", "fonts\\standard.flf", "assets\\cat.gif"]
+            self.assertEqual(release.embed_problems("onto", crate, packaged), [
+                "onto: src/lib.rs embeds ../../outside.txt, outside the crate; a package carries only its crate "
+                "directory. Copy the file into the crate (and add a test that the copy matches the original)"])
+
     def test_without_cargo_the_checks_are_skipped_with_a_warning(self):
         which = release.shutil.which
         release.shutil.which = lambda name: None
