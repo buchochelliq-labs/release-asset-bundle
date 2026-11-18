@@ -257,6 +257,7 @@ kind: use what the runner has, or install it in `run`.
 
 ```yaml
       - kind: ci-artifact
+        name: "wheel-linux-*"     # optional: the artifact's name, for `pin`
         artifact: 13290975305     # the GitHub Actions artifact's id
         sha256: 401bc5a6f09a149774a57d33f427aebdfbaee86bc939945b8368b19a8306fabb
         files: "dist/*.whl"       # the archive members to publish
@@ -282,9 +283,14 @@ anything is published, unless:
   as `v<version>`): `pkg-11.0`, `pkg-1.0.1` and `pkg-1.0rc1` are not `1.0`. At
   least one member must match.
 
-The usual order is: the CI run builds the artifact on the release branch; a
-commit then pins its `artifact` and `sha256` in `rab.yml`; that commit
-(or `main` after the release branch merges) is tagged.
+If `name` is given (a glob of the GitHub Actions artifact's name), the job
+also refuses an artifact whose name does not match it, and
+[`release.py pin --run ID`](commands.md#pin) can write `artifact` and
+`sha256` for you from a CI run.
+
+The usual order is: the CI run builds the artifact on the release branch;
+`release.py pin --run <that run>` pins its `artifact` and `sha256` in
+`rab.yml`; that commit (or `main` after the release branch merges) is tagged.
 
 The matching members are copied into `dist` under their own names, and the
 artifact's `test` (if any) runs on them as for any other kind. Only this kind's

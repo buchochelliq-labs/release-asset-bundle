@@ -29,6 +29,11 @@ Commands (person):
                 crates.io package has what `cargo publish` would refuse.
                 --offline, --publish-dry-run.
     sync        rewrite rab.yml's versions from the manifests.
+    pin --run ID
+                point each named ci-artifact at its artifact from successful
+                CI run ID, checked as the release run will check it, and
+                rewrite its `artifact:` and `sha256:` in rab.yml.
+                --package, --dry-run.
     status      each package: version, tag, and whether it is published.
     tag         tag the release and wait for it: an annotated record tag per
                 package due (which starts nothing), then the release tag,
@@ -120,7 +125,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
-VERSION = "2.1.2"
+VERSION = "2.2.0"
 CONFIG = "rab.yml"
 # release-kit 1.x's name for it: still read, with a warning, until rab 3.0.0.
 OLD_CONFIG = "release-kit.yml"
@@ -658,8 +663,9 @@ KINDS = {
     "vsix": ({"vscode", "github"}, set(), {"dir", "test", "prepare"}),
     "command": ({"github", "pypi", "vscode"}, {"run", "outputs"}, {"os", "test", "prepare"}),
     # Promote the exact files a CI run already built and tested, instead of
-    # building them again: the artifact id and its SHA-256 are pinned.
-    "ci-artifact": ({"github", "pypi", "vscode"}, {"artifact", "sha256", "files"}, {"test"}),
+    # building them again: the artifact id and its SHA-256 are pinned. `name`
+    # (the Actions artifact's name, a glob) lets `pin` find it in a run.
+    "ci-artifact": ({"github", "pypi", "vscode"}, {"artifact", "sha256", "files"}, {"test", "name"}),
 }
 # Registries that publish from source need no artifacts; the others do.
 FROM_SOURCE = {"crates.io", "npm"}
@@ -729,6 +735,8 @@ def artifact_errors(package):
                 errors.append(f"{where}: sha256 is the artifact archive's SHA-256, 64 lowercase hex digits")
             if not (isinstance(artifact.get("files"), str) and artifact["files"].strip()):
                 errors.append(f"{where}: files is a glob of the archive members to publish")
+            if "name" in artifact and not (isinstance(artifact["name"], str) and artifact["name"].strip()):
+                errors.append(f"{where}: name is a glob of the CI artifact's name, for `pin`")
         if kind in ("rust-binary", "maturin"):
             for target, runner in targets_of(artifact):
                 if not runner:
@@ -787,7 +795,8 @@ def plan(selection, read=None, output=None):
             elif kind == "ci-artifact":
                 jobs.append({**base, "id": job_id(package.slug, kind, index), "kind": kind,
                              "os": "ubuntu-latest", "target": "", "artifact": artifact["artifact"],
-                             "sha256": artifact["sha256"], "files": artifact["files"], "test": test_of(artifact)})
+                             "sha256": artifact["sha256"], "files": artifact["files"],
+                             "name": artifact.get("name") or "", "test": test_of(artifact)})
     ids = [j["id"] for j in jobs]
     if len(ids) != len(set(ids)):
         raise ValueError("two artifacts plan the same build job; give them different targets")
@@ -1203,9 +1212,10 @@ def github_api(path, accept="application/vnd.github+json"):
     """(status, headers, body) of a GET on the GitHub API with the job's token,
     without following redirects: an artifact's /zip answers with a signed URL
     that must be fetched without the token."""
-    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or gh_token()
     if not token:
-        raise RuntimeError("ci-artifact needs GH_TOKEN (a token with actions: read) to read CI artifacts")
+        raise RuntimeError("ci-artifact needs GH_TOKEN (a token with actions: read) to read CI artifacts; "
+                           "at a terminal, `gh auth login` gives one")
     request = Request(f"https://api.github.com{path}", headers={
         "User-Agent": USER_AGENT, "Accept": accept, "Authorization": f"Bearer {token}",
         "X-GitHub-Api-Version": "2022-11-28"})
@@ -1214,6 +1224,14 @@ def github_api(path, accept="application/vnd.github+json"):
             return response.status, dict(response.headers), response.read()
     except HTTPError as error:
         return error.code, dict(error.headers or {}), error.read()
+
+
+def gh_token():
+    """The GitHub CLI's token, for a person running `pin` at a terminal, or ''."""
+    if not shutil.which("gh"):
+        return ""
+    result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True)
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def download(url):
@@ -1258,6 +1276,8 @@ def promote(job, out, tagged=None):
         raise RuntimeError(f"{where} has expired; pin a newer run's artifact")
     if meta.get("digest") and meta["digest"] != f"sha256:{pinned}":
         raise RuntimeError(f"{where}: GitHub records {meta['digest']}, rab.yml pins sha256:{pinned}")
+    if job.get("name") and not fnmatch.fnmatchcase(meta.get("name") or "", job["name"]):
+        raise RuntimeError(f"{where} is named {meta.get('name')!r}, not {job['name']!r}: pin the right artifact")
     built = (meta.get("workflow_run") or {}).get("head_sha")
     if not built:
         raise RuntimeError(f"{where}: GitHub does not say which commit built it")
@@ -1270,38 +1290,180 @@ def promote(job, out, tagged=None):
         raise RuntimeError(f"{where} was built from {built[:12]}; since then {', '.join(other[:5])}"
                            f"{' and more' if len(other) > 5 else ''} changed: a release is one commit. "
                            f"Only {CONFIG} (the pin itself) may change after the build.")
-    status, headers, body = github_api(f"/repos/{repository()}/actions/artifacts/{ident}/zip")
-    location = {k.lower(): v for k, v in headers.items()}.get("location")
-    if status in (301, 302, 303, 307, 308) and location:
-        data = download(location)
-    elif status == 200:
-        data = body
-    else:
-        raise RuntimeError(f"{where}: download refused (HTTP {status})")
+    data = artifact_archive(ident, where)
     if hashlib.sha256(data).hexdigest() != pinned:
         raise RuntimeError(f"{where}: the archive's SHA-256 is {hashlib.sha256(data).hexdigest()}, "
                            f"rab.yml pins {pinned}")
-    version = pep440(job["version"]) if job["registry"] == "pypi" else job["version"]
     copied = []
     with zipfile.ZipFile(io.BytesIO(data)) as archive:
-        for info in archive.infolist():
-            name = info.filename
-            if info.is_dir() or not fnmatch.fnmatchcase(name, job["files"]):
-                continue
-            parts = PurePosixPath(name).parts
-            if name.startswith("/") or "\\" in name or ".." in parts:
-                raise RuntimeError(f"{where}: unsafe path {name!r} in the archive")
-            target = out / parts[-1]
-            if target.exists():
-                raise RuntimeError(f"{where}: two members are named {parts[-1]}")
-            if not version_in(parts[-1], version):
-                raise RuntimeError(f"{where}: {parts[-1]} is not version {version} of {job['package']}")
+        for info, base in release_members(archive, job, where):
+            target = out / base
             target.write_bytes(archive.read(info))
             copied.append(target)
-    if not copied:
-        raise RuntimeError(f"{where}: no member matches {job['files']!r}")
     print(f"promoted {where} ({built[:12]}): " + ", ".join(p.name for p in copied), flush=True)
     return copied
+
+
+def artifact_archive(ident, where):
+    """The bytes of CI artifact `ident`'s zip archive."""
+    status, headers, body = github_api(f"/repos/{repository()}/actions/artifacts/{ident}/zip")
+    location = {k.lower(): v for k, v in headers.items()}.get("location")
+    if status in (301, 302, 303, 307, 308) and location:
+        return download(location)
+    if status == 200:
+        return body
+    raise RuntimeError(f"{where}: download refused (HTTP {status})")
+
+
+def release_members(archive, job, where):
+    """[(member, file name)] of the archive's members `job["files"]` selects,
+    each a safe path whose name carries exactly the package's version; at
+    least one, and no two with the same name."""
+    version = pep440(job["version"]) if job["registry"] == "pypi" else job["version"]
+    chosen, names = [], set()
+    for info in archive.infolist():
+        name = info.filename
+        if info.is_dir() or not fnmatch.fnmatchcase(name, job["files"]):
+            continue
+        parts = PurePosixPath(name).parts
+        if name.startswith("/") or "\\" in name or ".." in parts:
+            raise RuntimeError(f"{where}: unsafe path {name!r} in the archive")
+        if parts[-1] in names:
+            raise RuntimeError(f"{where}: two members are named {parts[-1]}")
+        if not version_in(parts[-1], version):
+            raise RuntimeError(f"{where}: {parts[-1]} is not version {version} of {job['package']}")
+        names.add(parts[-1])
+        chosen.append((info, parts[-1]))
+    if not chosen:
+        raise RuntimeError(f"{where}: no member matches {job['files']!r}")
+    return chosen
+
+
+def ci_artifact_nodes(text):
+    """{(package index, artifact index): {"artifact": node, "sha256": node}} for
+    every ci-artifact in rab.yml's text: the YAML nodes of the values `pin`
+    rewrites, whose marks say where each is written."""
+    import yaml
+    def value(mapping, key):
+        return next((v for k, v in mapping.value if getattr(k, "value", None) == key), None)
+    root_node, found = yaml.compose(text), {}
+    packages = value(root_node, "packages") if isinstance(root_node, yaml.MappingNode) else None
+    for p_index, package in enumerate(getattr(packages, "value", None) or []):
+        artifacts = value(package, "artifacts") if isinstance(package, yaml.MappingNode) else None
+        for a_index, artifact in enumerate(getattr(artifacts, "value", None) or []):
+            if isinstance(artifact, yaml.MappingNode) and getattr(value(artifact, "kind"), "value", None) == "ci-artifact":
+                found[(p_index, a_index)] = {"artifact": value(artifact, "artifact"), "sha256": value(artifact, "sha256")}
+    return found
+
+
+def run_artifacts(run_id):
+    """Every artifact of CI run `run_id` in this repository."""
+    found, page = [], 1
+    while True:
+        status, _, body = github_api(f"/repos/{repository()}/actions/runs/{run_id}/artifacts?per_page=100&page={page}")
+        if status != 200:
+            raise RuntimeError(f"cannot list the artifacts of run {run_id} in {repository()} (HTTP {status})")
+        batch = json.loads(body).get("artifacts") or []
+        found += batch
+        if len(batch) < 100:
+            return found
+        page += 1
+
+
+def pin(run_id, only=None, dry_run=False, path=None):
+    """Point each ci-artifact that has a `name` at the matching artifact of
+    CI run `run_id`, after checking it as the release run will: the run
+    succeeded, exactly one unexpired artifact matches, its archive's SHA-256 is
+    the digest GitHub records, and `files` selects members carrying exactly
+    the package's version. Rewrites only those `artifact:` and `sha256:`
+    values in rab.yml, keeping comments and layout (not with `dry_run`).
+    Returns what changed, then any warning about tagging HEAD."""
+    path = path or config_path()
+    text = path.read_text(encoding="utf-8")
+
+    def reading(name):
+        if name != path.name:
+            raise FileNotFoundError(name)
+        return text
+
+    release = load(reading)
+    if only and only not in {p.name for p in release.packages}:
+        raise ValueError(f"{CONFIG} lists no package {only!r}")
+    entries = [(p_index, a_index, package, artifact)
+               for p_index, package in enumerate(release.packages) if not only or package.name == only
+               for a_index, artifact in enumerate(package.artifacts) if artifact.get("kind") == "ci-artifact"]
+    unnamed = [f"{package.name}: artifact {a_index + 1}" for _, a_index, package, artifact in entries
+               if not artifact.get("name")]
+    entries = [entry for entry in entries if entry[3].get("name")]
+    if not entries:
+        raise ValueError("no ci-artifact " + (f"of {only} " if only else "") + "has a `name`: give each the CI "
+                         "artifact's name (a glob) so `pin` can find it in a run")
+    status, _, body = github_api(f"/repos/{repository()}/actions/runs/{run_id}")
+    if status != 200:
+        raise RuntimeError(f"run {run_id} not found in {repository()} (HTTP {status})")
+    run_meta = json.loads(body)
+    if (run_meta.get("status"), run_meta.get("conclusion")) != ("completed", "success"):
+        raise RuntimeError(f"run {run_id} is {run_meta.get('status')}/{run_meta.get('conclusion')}: "
+                           "pin only the artifacts of a successful run")
+    built = run_meta.get("head_sha") or ""
+    available = run_artifacts(run_id)
+    nodes = ci_artifact_nodes(text)
+    edits, lines = [], []
+    for p_index, a_index, package, artifact in entries:
+        where = f"{package.name}: artifact {a_index + 1} ({artifact['name']})"
+        matches = [a for a in available if fnmatch.fnmatchcase(a.get("name") or "", artifact["name"])]
+        live = [a for a in matches if not a.get("expired")]
+        if len(live) != 1:
+            names = ", ".join(sorted(a.get("name") or "?" for a in (live or matches))) or "nothing"
+            raise RuntimeError(f"{where}: run {run_id} has {len(live)} unexpired artifacts matching it "
+                               f"({names}); exactly one must match"
+                               + ("" if live or matches else
+                                  f". The run's artifacts: {', '.join(sorted(a.get('name') or '?' for a in available)) or 'none'}"))
+        chosen = live[0]
+        data = artifact_archive(chosen["id"], where)
+        digest = hashlib.sha256(data).hexdigest()
+        if chosen.get("digest") and chosen["digest"] != f"sha256:{digest}":
+            raise RuntimeError(f"{where}: GitHub records {chosen['digest']}, the archive is sha256:{digest}")
+        with zipfile.ZipFile(io.BytesIO(data)) as archive:
+            members = [base for _, base in release_members(
+                archive, {"files": artifact["files"], "version": package.version,
+                          "registry": package.registry, "package": package.name}, where)]
+        node = nodes.get((p_index, a_index)) or {}
+        if not node.get("artifact") or not node.get("sha256"):
+            raise ValueError(f"{where}: write `artifact:` and `sha256:` in {CONFIG} (any placeholder) for pin "
+                             "to replace")
+        quote_mark = node["sha256"].style if node["sha256"].style in ("'", '"') else '"'
+        edits += [(node["artifact"], str(chosen["id"])), (node["sha256"], f"{quote_mark}{digest}{quote_mark}")]
+        same = (artifact.get("artifact"), artifact.get("sha256")) == (chosen["id"], digest)
+        lines.append(f"{where}: " + ("already pinned to " if same else f"{artifact.get('artifact')} -> ")
+                     + f"{chosen['id']} {chosen.get('name')} sha256 {digest[:12]} ({', '.join(members)})")
+    for edit_node, replacement in sorted(edits, key=lambda e: e[0].start_mark.index, reverse=True):
+        text = text[:edit_node.start_mark.index] + replacement + text[edit_node.end_mark.index:]
+    repinned = load(reading)
+    for p_index, a_index, package, artifact in entries:
+        again = repinned.packages[p_index].artifacts[a_index]
+        if not isinstance(again.get("artifact"), int) or not re.fullmatch(r"[0-9a-f]{64}", str(again.get("sha256"))):
+            raise RuntimeError(f"{package.name}: artifact {a_index + 1}: the rewritten {CONFIG} does not read back; "
+                               "nothing was written")
+    lines.insert(0, f"run {run_id} ({run_meta.get('event')} on {run_meta.get('head_branch')}, "
+                    f"built from {built[:12]}):")
+    for name in unnamed:
+        lines.append(f"warning: {name} has no `name`, so pin left it as it was")
+    try:
+        head = git("rev-parse", "HEAD")
+        relation, changed = changes_since(built, head)
+        other = [name for name in changed if name not in (CONFIG, OLD_CONFIG)]
+        if relation not in ("identical", "ahead") or other:
+            lines.append(f"warning: tagging HEAD ({head[:12]}) would be refused: it "
+                         + (f"does not descend from {built[:12]} ({relation})" if relation not in ("identical", "ahead")
+                            else f"changes {', '.join(other[:5])}{' and more' if len(other) > 5 else ''} since "
+                                 f"{built[:12]}")
+                         + f". Tag a commit that adds only this pin to {built[:12]}.")
+    except (RuntimeError, subprocess.CalledProcessError, OSError) as error:
+        lines.append(f"warning: could not compare HEAD with {built[:12]}: {error}")
+    if not dry_run:
+        path.write_text(text, encoding="utf-8")
+    return lines
 
 
 def build(job, out=Path("dist")):
@@ -3231,6 +3393,10 @@ def main(argv=None):
     checker.add_argument("--publish-dry-run", action="store_true",
                          help="also run `cargo publish --dry-run` over the crates.io packages (builds them; for CI)")
     commands.add_parser("sync")
+    pinner = commands.add_parser("pin")
+    pinner.add_argument("--run", required=True, type=int, help="the successful CI run whose artifacts to pin")
+    pinner.add_argument("--package", help="pin only this package's ci-artifacts")
+    pinner.add_argument("--dry-run", action="store_true", help="check and print, but leave rab.yml as it is")
     commands.add_parser("status")
     tagger = commands.add_parser("tag")
     tagger.add_argument("--commit")
@@ -3319,6 +3485,12 @@ def main(argv=None):
             print(f"{CONFIG} matches the repository (release {release.name}).")
         elif args.command == "sync":
             print("\n".join(sync()) or "Nothing to change.")
+        elif args.command == "pin":
+            lines = pin(args.run, args.package, args.dry_run)
+            print("\n".join(lines))
+            print("Nothing written (--dry-run)." if args.dry_run else
+                  f"Wrote {CONFIG}. Commit it on its own (the pin is the only change rule 4 allows after the "
+                  "build), then tag.")
         elif args.command == "status":
             print("\n".join(status_lines()))
         elif args.command == "tag":
