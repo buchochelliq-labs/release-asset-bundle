@@ -58,6 +58,46 @@ After you bump versions in the manifests, rewrites each package's `version:`
 line in `rab.yml` to match, quoted, keeping comments and layout. It
 prints one line per change (`onto: 0.1.0 -> 0.2.0`) or `Nothing to change.`
 
+### `pin`
+
+```sh
+release.py pin --run RUN_ID [--package NAME] [--dry-run]
+```
+
+Points each [`ci-artifact`](configuration.md#ci-artifact) that has a `name`
+at the matching artifact of CI run `RUN_ID`, and rewrites only its
+`artifact:` and `sha256:` values in `rab.yml`, keeping comments and layout.
+Run it after the release-candidate CI run you mean to ship has passed, so
+nobody copies artifact ids or checksums by hand.
+
+Before it writes anything, it checks the pin as the release run will:
+
+- the run completed successfully;
+- exactly one unexpired artifact of the run matches each `name` (a glob);
+- the archive's SHA-256, computed from the downloaded bytes, is the digest
+  GitHub records;
+- `files` selects at least one member, every one a safe path whose name
+  carries exactly the package's version.
+
+It prints the run and one line per pin, for example:
+
+```text
+run 44279129426 (push on release/v0.0.3-rc, built from 99aeb3ebc127):
+intentumdiff-python: artifact 1 (candidate-evidence-ubuntu-latest-*): 1 -> 14421310046 candidate-evidence-ubuntu-latest-1 sha256 cf35a90e7ddd (intentumdiff_python-0.0.3b1-py3-none-manylinux_2_39_x86_64.whl)
+Wrote rab.yml. Commit it on its own (the pin is the only change rule 4 allows after the build), then tag.
+```
+
+It warns when tagging the commit you are on would be refused because that
+commit changes more than `rab.yml` since the run's commit, or doesn't
+descend from it. A `ci-artifact` without a `name` is left as it is, with a
+warning. `--package` pins one package's artifacts; `--dry-run` checks and
+prints without writing.
+
+Before the first pin, write any placeholder (`artifact: 1`, a 64-zero
+`sha256`) for `pin` to replace. It reads the token from `GH_TOKEN` or
+`GITHUB_TOKEN`, else from the GitHub CLI (`gh auth token`). The token needs
+`actions: read` on the repository.
+
 ### `status`
 
 ```sh

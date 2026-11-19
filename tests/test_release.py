@@ -1586,6 +1586,145 @@ class Install(unittest.TestCase):
             ".github/rab/manifest.json is missing: install rab (release.py install)"])
 
 
+class Pin(unittest.TestCase):
+    """`pin --run ID` points named ci-artifacts at a run's artifacts; GitHub is faked."""
+    CONFIG = """# reviewed wheels, promoted unchanged
+packages:
+  - name: pkg
+    registry: pypi
+    manifest: py/pyproject.toml
+    version: "1.0b1"
+    artifacts:
+      - kind: ci-artifact
+        name: evidence-linux-*        # the Actions artifact
+        artifact: 1                   # placeholder until the first pin
+        sha256: "%s"
+        files: "dist/*.whl"
+      - {kind: ci-artifact, name: evidence-mac-*, artifact: 1, sha256: '%s', files: "dist/*.whl"}
+""" % ("0" * 64, "0" * 64)
+
+    def archive(self, members):
+        import zipfile
+        stream = io.BytesIO()
+        with zipfile.ZipFile(stream, "w") as archive:
+            for name, data in members.items():
+                archive.writestr(name, data)
+        return stream.getvalue()
+
+    def setUp(self):
+        import hashlib
+        self.zips = {101: self.archive({"dist/pkg-1.0b1-py3-none-manylinux_2_39_x86_64.whl": b"linux"}),
+                     102: self.archive({"dist/pkg-1.0b1-py3-none-macosx_11_0_arm64.whl": b"mac",
+                                        "logs/build.txt": b"not selected"})}
+        self.run = {"status": "completed", "conclusion": "success", "head_sha": "b" * 40,
+                    "event": "push", "head_branch": "release/v1.0-rc"}
+        self.artifacts = [{"id": 101, "name": "evidence-linux-1", "expired": False,
+                           "digest": "sha256:" + hashlib.sha256(self.zips[101]).hexdigest()},
+                          {"id": 102, "name": "evidence-mac-1", "expired": False,
+                           "digest": "sha256:" + hashlib.sha256(self.zips[102]).hexdigest()},
+                          {"id": 99, "name": "evidence-mac-0", "expired": True}]
+        self.compare = ("identical", [])
+
+    def api(self, path, accept=None):
+        if path.endswith("/zip"):
+            ident = int(path.split("/")[-2])
+            return 200, {}, self.zips[ident]
+        if "/compare/" in path:
+            relation, files = self.compare
+            return 200, {}, json.dumps({"status": relation, "files": [{"filename": f} for f in files]}).encode()
+        if "/artifacts?" in path:
+            return 200, {}, json.dumps({"artifacts": self.artifacts}).encode()
+        if "/actions/runs/" in path:
+            return 200, {}, json.dumps(self.run).encode()
+        raise AssertionError(path)
+
+    def pin(self, text=None, **kwargs):
+        with tempfile.TemporaryDirectory() as d, \
+                mock.patch.object(release, "github_api", self.api), \
+                mock.patch.object(release, "repository", lambda: "owner/repo"), \
+                mock.patch.object(release, "git", lambda *args, **kw: "c" * 40):
+            path = Path(d) / "rab.yml"
+            path.write_text(text or self.CONFIG)
+            lines = release.pin(7, path=path, **kwargs)
+            return lines, path.read_text()
+
+    def test_pin_rewrites_only_the_pins_and_keeps_the_layout(self):
+        import hashlib
+        lines, text = self.pin()
+        linux, mac = (hashlib.sha256(self.zips[i]).hexdigest() for i in (101, 102))
+        self.assertEqual(text, self.CONFIG.replace("artifact: 1 ", "artifact: 101 ", 1)
+                         .replace('"' + "0" * 64 + '"', f'"{linux}"', 1)
+                         .replace("artifact: 1,", "artifact: 102,", 1)
+                         .replace("'" + "0" * 64 + "'", f"'{mac}'", 1))
+        self.assertIn("# placeholder until the first pin", text)
+        files = {"py/pyproject.toml": '[project]\nname = "pkg"\nversion = "1.0b1"\n', "rab.yml": text}
+        self.assertEqual(release.check(reader(files)), [])
+        self.assertIn("run 7 (push on release/v1.0-rc, built from bbbbbbbbbbbb):", lines[0])
+        self.assertTrue(any("1 -> 102 evidence-mac-1" in line and "macosx_11_0_arm64.whl" in line for line in lines))
+        self.assertFalse(any(line.startswith("warning") for line in lines), lines)
+
+    def test_pinning_again_says_so(self):
+        _, text = self.pin()
+        lines, again = self.pin(text)
+        self.assertEqual(again, text)
+        self.assertTrue(any("already pinned to 101" in line for line in lines))
+
+    def test_a_dry_run_writes_nothing(self):
+        _, text = self.pin(dry_run=True)
+        self.assertEqual(text, self.CONFIG)
+
+    def test_one_package_only(self):
+        with self.assertRaisesRegex(ValueError, "no package 'other'"):
+            self.pin(only="other")
+
+    def test_pin_fails_closed(self):
+        import hashlib
+        cases = [
+            ("is completed/failure", lambda: self.run.update(conclusion="failure")),
+            ("exactly one must match", lambda: self.artifacts.append(dict(self.artifacts[0], id=103,
+                                                                          name="evidence-linux-2"))),
+            ("The run's artifacts: evidence-mac", lambda: self.artifacts.pop(0)),
+            ("GitHub records sha256:1", lambda: self.artifacts[0].update(digest="sha256:" + "1" * 64)),
+            ("is not version 1.0b1", lambda: self.zips.update(
+                {101: self.archive({"dist/pkg-1.0b2-py3-none-any.whl": b"x"})}) or self.artifacts[0].update(
+                digest="sha256:" + hashlib.sha256(self.zips[101]).hexdigest())),
+        ]
+        for message, breaking in cases:
+            self.setUp()
+            breaking()
+            with self.assertRaisesRegex(RuntimeError, message):
+                self.pin()
+        self.setUp()
+        with self.assertRaisesRegex(ValueError, "has a `name`"):
+            self.pin(self.CONFIG.replace("        name: evidence-linux-*        # the Actions artifact\n", "")
+                     .replace("name: evidence-mac-*, ", ""))
+
+    def test_a_ci_artifact_without_a_name_is_left_alone(self):
+        text = self.CONFIG.replace("name: evidence-mac-*, ", "")
+        lines, after = self.pin(text)
+        self.assertIn("'" + "0" * 64 + "'", after)
+        self.assertIn("warning: pkg: artifact 2 has no `name`", "\n".join(lines))
+
+    def test_it_warns_when_head_could_not_be_tagged(self):
+        self.compare = ("ahead", ["rab.yml", "src/app.py"])
+        lines, _ = self.pin()
+        self.assertIn("tagging HEAD (cccccccccccc) would be refused: it changes src/app.py", lines[-1])
+        self.compare = ("diverged", [])
+        lines, _ = self.pin()
+        self.assertIn("does not descend from bbbbbbbbbbbb (diverged)", lines[-1])
+
+    def test_name_is_checked_and_promotion_refuses_another_artifact(self):
+        base = {"py/pyproject.toml": '[project]\nname = "pkg"\nversion = "1.0"\n'}
+        bad = 'packages:\n  - name: pkg\n    registry: pypi\n    manifest: py/pyproject.toml\n    version: "1.0"\n' \
+              '    artifacts: [{kind: ci-artifact, name: "", artifact: 4, sha256: ' + "a" * 64 + ', files: "dist/*"}]\n'
+        self.assertIn("name is a glob", "\n".join(release.check(reader({**base, "rab.yml": bad}))))
+        ci = CiArtifact()
+        data = ci.archive({CiArtifact.WHEEL: b"reviewed wheel"})
+        with self.assertRaisesRegex(RuntimeError, "is named None, not 'evidence-\\*'"):
+            ci.promote(data, job=ci.job(data, name="evidence-*"))
+        self.assertEqual(ci.promote(data, job=ci.job(data, name="*")), [("pkg-1.0-py3-none-any.whl", b"reviewed wheel")])
+
+
 class Sync(unittest.TestCase):
     def test_sync_rewrites_versions_and_keeps_comments(self):
         with tempfile.TemporaryDirectory() as d:

@@ -43,6 +43,22 @@ want, run `install`, and open a PR. From release-kit 1.x, see
 
 ## Changelog
 
+### v2.2.0
+
+**`pin` writes `ci-artifact` pins from a CI run.** `release.py pin --run ID`
+finds each `ci-artifact`'s artifact in a successful run by its new optional
+`name` (a glob of the Actions artifact's name). It downloads the archive and
+checks it as the release run will: exactly one unexpired match, the SHA-256
+GitHub records, and members that carry exactly the package's version. Then it
+rewrites only the `artifact:` and `sha256:` values in `rab.yml`, keeping
+comments and layout. It warns when the commit you are on could not be tagged
+for that run. Hand-copied ids and checksums are why IntentumDiff's 0.0.3
+publish first failed, on a wheel list a shell had stripped of its quotes;
+`pin` leaves nothing to paste. A `ci-artifact` with a `name` is also refused
+at release time if its pinned artifact is named otherwise. `--dry-run` checks
+without writing; `--package` pins one package. Without `GH_TOKEN`, the token
+comes from `gh auth token`.
+
 ### v2.1.2
 
 **Fixed: `check` on Windows refused every crate's embeds.** `cargo package
